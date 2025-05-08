@@ -9,937 +9,2790 @@
 
 
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
-#include <gmssl/sdf.h>
+#include <string.h>
+#include <assert.h>
+#include <unistd.h>
+#include <gmssl/mem.h>
 #include <gmssl/sm2.h>
-#include <gmssl/sm4.h>
+#include <gmssl/sm3.h>
+#include <gmssl/sm4_cbc_mac.h>
+#include <gmssl/rand.h>
 #include <gmssl/error.h>
-#include "sdf.h"
-#include "sdf_ext.h"
+#include <gmssl/sdf/sdf.h>
 
 
 static const uint8_t zeros[ECCref_MAX_LEN - 32] = {0};
 
-static void ECCrefPublicKey_from_SM2_Z256_POINT(ECCrefPublicKey *ref, const SM2_Z256_POINT *z256_point)
+
+
+
+struct SOFTSDF_CONTAINER {
+	unsigned int key_index;
+	SM2_KEY sign_key;
+	SM2_KEY enc_key;
+	struct SOFTSDF_CONTAINER *next;
+};
+typedef struct SOFTSDF_CONTAINER SOFTSDF_CONTAINER;
+
+struct SOFTSDF_SESSION {
+	SOFTSDF_CONTAINER *container_list;
+	SOFTSDF_KEY *key_list;
+	SM3_CTX sm3_ctx;
+	struct SOFTSDF_SESSION *next;
+};
+typedef struct SOFTSDF_SESSION SOFTSDF_SESSION;
+
+struct SOFTSDF_DEVICE {
+	SOFTSDF_SESSION *session_list;
+};
+typedef struct SOFTSDF_DEVICE SOFTSDF_DEVICE;
+
+SOFTSDF_DEVICE *deviceHandle = NULL;
+
+
+
+#define FILENAME_MAX_LEN 256
+
+int SDF_OpenDevice(
+	void **phDeviceHandle)
 {
-	SM2_POINT point;
-	sm2_z256_point_to_bytes(z256_point, (uint8_t *)&point);
-	ref->bits = 256;
-	memcpy(ref->x, zeros, sizeof(zeros));
-	memcpy(ref->x + sizeof(zeros), point.x, 32);
-	memcpy(ref->y, zeros, sizeof(zeros));
-	memcpy(ref->y + sizeof(zeros), point.y, 32);
+	if (phDeviceHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (deviceHandle != NULL) {
+		error_print();
+		return SDR_OPENDEVICE;
+	}
+
+	deviceHandle = (SOFTSDF_DEVICE *)malloc(sizeof(SOFTSDF_DEVICE));
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_OPENDEVICE;
+	}
+	memset(deviceHandle, 0, sizeof(SOFTSDF_DEVICE));
+
+	*phDeviceHandle = deviceHandle;
+	return SDR_OK;
 }
 
-static int ECCrefPublicKey_to_SM2_Z256_POINT(const ECCrefPublicKey *ref, SM2_Z256_POINT *z256_point)
+int SDF_CloseDevice(
+	void *hDeviceHandle)
 {
-	SM2_POINT point;
-	if (ref->bits != 256
-		|| memcmp(ref->x, zeros, sizeof(zeros)) != 0
-		|| memcmp(ref->y, zeros, sizeof(zeros)) != 0) {
+	if (hDeviceHandle != deviceHandle) {
 		error_print();
-		return -1;
-	}
-	memcpy(point.x, ref->x + sizeof(zeros), 32);
-	memcpy(point.y, ref->y + sizeof(zeros), 32);
-	if (sm2_z256_point_from_bytes(z256_point, (uint8_t *)&point) != 1) {
-		error_print();
-		return -1;
-	}
-	return 1;
-}
-
-static void ECCSignature_from_SM2_SIGNATURE(ECCSignature *ref, const SM2_SIGNATURE *sig)
-{
-	memcpy(ref->r, zeros, sizeof(zeros));
-	memcpy(ref->r + sizeof(zeros), sig->r, 32);
-	memcpy(ref->s, zeros, sizeof(zeros));
-	memcpy(ref->s + sizeof(zeros), sig->s, 32);
-}
-
-static int ECCSignature_to_SM2_SIGNATURE(const ECCSignature *ref, SM2_SIGNATURE *sig)
-{
-	if (memcmp(ref->r, zeros, sizeof(zeros)) != 0
-		|| memcmp(ref->s, zeros, sizeof(zeros)) != 0) {
-		error_print();
-		return -1;
-	}
-	memcpy(sig->r, ref->r + sizeof(zeros), 32);
-	memcpy(sig->s, ref->s + sizeof(zeros), 32);
-	return 1;
-}
-
-static void ECCCipher_from_SM2_CIPHERTEXT(ECCCipher *eccCipher, const SM2_CIPHERTEXT *ciphertext)
-{
-	memcpy(eccCipher->x, zeros, sizeof(zeros));
-	memcpy(eccCipher->x + sizeof(zeros), ciphertext->point.x, 32);
-	memcpy(eccCipher->y, zeros, sizeof(zeros));
-	memcpy(eccCipher->y + sizeof(zeros), ciphertext->point.y, 32);
-	memcpy(eccCipher->M, ciphertext->hash, 32);
-	memcpy(eccCipher->C, ciphertext->ciphertext, ciphertext->ciphertext_size);
-	eccCipher->L = ciphertext->ciphertext_size;
-}
-
-static int ECCCipher_to_SM2_CIPHERTEXT(const ECCCipher *eccCipher, SM2_CIPHERTEXT *ciphertext)
-{
-	static const uint8_t zeros[ECCref_MAX_LEN - 32] = {0};
-	if (eccCipher->L > SM2_MAX_PLAINTEXT_SIZE
-		|| memcmp(eccCipher->x, zeros, sizeof(zeros)) != 0
-		|| memcmp(eccCipher->y, zeros, sizeof(zeros)) != 0) {
-		error_print();
-		return -1;
-	}
-	memcpy(ciphertext->point.x, eccCipher->x + sizeof(zeros), 32);
-	memcpy(ciphertext->point.y, eccCipher->y + sizeof(zeros), 32);
-	memcpy(ciphertext->hash, eccCipher->M, 32);
-	memcpy(ciphertext->ciphertext, eccCipher->C, eccCipher->L);
-	ciphertext->ciphertext_size = eccCipher->L;
-	return 1;
-}
-
-
-
-
-int sdf_load_library(const char *so_path, const char *vendor)
-{
-	if (SDF_LoadLibrary((char *)so_path, (char *)vendor) != SDR_OK) {
-		error_print();
-		return -1;
-	}
-	return 1;
-}
-
-void sdf_unload_library(void)
-{
-	SDF_UnloadLibrary();
-}
-
-int sdf_open_device(SDF_DEVICE *dev)
-{
-	int ret = -1;
-	void *hDevice = NULL;
-	void *hSession = NULL;
-	DEVICEINFO devInfo;
-
-	if (SDF_OpenDevice(&hDevice) != SDR_OK) {
-		error_print();
-		return -1;
-	}
-	if (SDF_OpenSession(hDevice, &hSession) != SDR_OK) {
-		(void)SDF_CloseDevice(hDevice);
-		error_print();
-		return -1;
-	}
-	if (SDF_GetDeviceInfo(hSession, &devInfo) != SDR_OK) {
-		(void)SDF_CloseSession(hSession);
-		(void)SDF_CloseDevice(hDevice);
-		error_print();
-		return -1;
-	}
-	(void)SDF_CloseSession(hSession);
-
-	memset(dev, 0, sizeof(SDF_DEVICE));
-	dev->handle = hDevice;
-	memcpy(dev->issuer, devInfo.IssuerName, 40);
-	memcpy(dev->name, devInfo.DeviceName, 16);
-	memcpy(dev->serial, devInfo.DeviceSerial, 16);
-	return 1;
-}
-
-int sdf_print_device_info(FILE *fp, int fmt, int ind, const char *lable, SDF_DEVICE *dev)
-{
-	void *hSession = NULL;
-	DEVICEINFO devInfo;
-
-	if (SDF_OpenSession(dev->handle, &hSession) != SDR_OK) {
-		error_print();
-		return -1;
-	}
-	if (SDF_GetDeviceInfo(hSession, &devInfo) != SDR_OK) {
-		(void)SDF_CloseSession(hSession);
-		error_print();
-		return -1;
-	}
-	(void)SDF_CloseSession(hSession);
-
-	(void)SDF_PrintDeviceInfo(fp, &devInfo);
-	return 1;
-}
-
-int sdf_digest_init(SDF_DIGEST_CTX *ctx, SDF_DEVICE *dev)
-{
-	void *hSession;
-	int ret;
-
-	if (!dev || !ctx) {
-		error_print();
-		return -1;
-	}
-	if (!dev->handle) {
-		error_print();
-		return -1;
-	}
-	if ((ret = SDF_OpenSession(dev->handle, &hSession)) != SDR_OK) {
-		error_print();
-		return -1;
-	}
-	if ((ret = SDF_HashInit(hSession, SGD_SM3, NULL, NULL, 0)) != SDR_OK) {
-		(void)SDF_CloseSession(hSession);
-		error_print();
-		return -1;
-	}
-	ctx->session = hSession;
-	return 1;
-}
-
-int sdf_digest_update(SDF_DIGEST_CTX *ctx, const uint8_t *data, size_t datalen)
-{
-	int ret;
-
-	if (!ctx) {
-		error_print();
-		return -1;
-	}
-	if (!ctx->session) {
-		error_print();
-		return -1;
-	}
-	if ((ret = SDF_HashUpdate(ctx->session, (uint8_t *)data, (unsigned int)datalen)) != SDR_OK) {
-		error_print();
-		return -1;
-	}
-	return 1;
-}
-
-int sdf_digest_finish(SDF_DIGEST_CTX *ctx, uint8_t dgst[SM3_DIGEST_SIZE])
-{
-	unsigned int dgstlen;
-	int ret;
-
-	if (!ctx || !dgst) {
-		error_print();
-		return -1;
-	}
-	if (!ctx->session) {
-		error_print();
-		return -1;
-	}
-	if ((ret = SDF_HashFinal(ctx->session, dgst, &dgstlen)) != SDR_OK) {
-		error_print();
-		return -1;
-	}
-	if (dgstlen != 32) {
-		error_print();
-		return -1;
-	}
-	return 1;
-}
-
-int sdf_digest_reset(SDF_DIGEST_CTX *ctx)
-{
-	int ret;
-
-	if (!ctx) {
-		error_print();
-		return -1;
-	}
-	if (!ctx->session) {
-		error_print();
-		return -1;
-	}
-	if ((ret = SDF_HashInit(ctx->session, SGD_SM3, NULL, NULL, 0)) != SDR_OK) {
-		error_print();
-		return -1;
-	}
-	return 1;
-}
-
-int sdf_digest_cleanup(SDF_DIGEST_CTX *ctx)
-{
-	if (ctx && ctx->session) {
-		if (SDF_CloseSession(ctx->session) != SDR_OK) {
-			error_print();
-			return -1;
-		}
-		ctx->session = NULL;
-	}
-	return 1;
-}
-
-static int sdf_cbc_encrypt_blocks(SDF_KEY *key, uint8_t iv[16], const uint8_t *in, size_t nblocks, uint8_t *out)
-{
-	unsigned int inlen = (unsigned int)(nblocks * 16);
-	unsigned int outlen = 0;
-
-	if (SDF_Encrypt(key->session, key->handle, SGD_SM4_CBC, iv,
-		(unsigned char *)in, inlen, out, &outlen) != SDR_OK) {
-		error_print();
-		return -1;
-	}
-	if (outlen != inlen) {
-		error_print();
-		return -1;
-	}
-	if (outlen) {
-		if (memcmp(iv, out + outlen - 16, 16) != 0) {
-			memcpy(iv, out + outlen - 16, 16);
-		}
-	}
-	return 1;
-}
-
-static int sdf_cbc_decrypt_blocks(SDF_KEY *key, uint8_t iv[16], const uint8_t *in, size_t nblocks, uint8_t *out)
-{
-	unsigned int inlen = (unsigned int)(nblocks * 16);
-	unsigned int outlen = 0;
-
-	if (SDF_Decrypt(key->session, key->handle, SGD_SM4_CBC,
-		iv, (unsigned char *)in, inlen, out, &outlen) != SDR_OK) {
-		error_print();
-		return -1;
-	}
-	if (outlen != inlen) {
-		error_print();
-		return -1;
-	}
-	if (inlen) {
-		if (memcmp(iv, in + inlen - 16, 16) != 0) {
-			memcmp(iv, in + inlen - 16, 16);
-		}
-	}
-	return 1;
-}
-
-static int sdf_cbc_padding_encrypt(SDF_KEY *key,
-	const uint8_t piv[16], const uint8_t *in, size_t inlen,
-	uint8_t *out, size_t *outlen)
-{
-	uint8_t iv[16];
-	uint8_t block[16];
-	size_t rem = inlen % 16;
-	int padding = 16 - inlen % 16;
-
-	memcpy(iv, piv, 16);
-	if (in) {
-		memcpy(block, in + inlen - rem, rem);
-	}
-	memset(block + rem, padding, padding);
-
-	if (inlen/16) {
-		if (sdf_cbc_encrypt_blocks(key, iv, in, inlen/16, out) != 1) {
-			error_print();
-			return -1;
-		}
-		out += inlen - rem;
+		return SDR_INARGERR;
 	}
 
-	if (sdf_cbc_encrypt_blocks(key, iv, block, 1, out) != 1) {
-		error_print();
-		return -1;
-	}
-	*outlen = inlen - rem + 16;
-	return 1;
-}
-
-static int sdf_cbc_padding_decrypt(SDF_KEY *key,
-	const uint8_t piv[16], const uint8_t *in, size_t inlen,
-	uint8_t *out, size_t *outlen)
-{
-	uint8_t iv[16];
-	uint8_t block[16];
-	size_t len = sizeof(block);
-	int padding;
-
-	if (inlen%16 != 0 || inlen < 16) {
-		error_print();
-		return -1;
-	}
-
-	memcpy(iv, piv, 16);
-
-	if (inlen > 16) {
-		if (sdf_cbc_decrypt_blocks(key, iv, in, inlen/16 - 1, out) != 1) {
-			error_print();
-			return -1;
-		}
-	}
-
-	if (sdf_cbc_decrypt_blocks(key, iv, in + inlen - 16, 1, block) != 1) {
-		error_print();
-		return -1;
-	}
-
-	padding = block[15];
-	if (padding < 1 || padding > 16) {
-		error_print();
-		return -1;
-	}
-	len -= padding;
-	memcpy(out + inlen - 16, block, len);
-	*outlen = inlen - padding;
-	return 1;
-}
-
-int sdf_generate_key(SDF_DEVICE *dev, SDF_KEY *key,
-	const SM2_KEY *sm2_key, uint8_t *wrappedkey, size_t *wrappedkey_len)
-{
-	void *hSession;
-	void *hKey;
-	ECCrefPublicKey eccPublicKey;
-	ECCCipher eccCipher;
-	SM2_CIPHERTEXT ciphertext;
-	int ret;
-
-	if (!dev || !key || !sm2_key || !wrappedkey_len) {
-		error_print();
-		return -1;
-	}
-	if (!dev->handle) {
-		error_print();
-		return -1;
-	}
-	if (!wrappedkey) {
-		*wrappedkey_len = SM2_MAX_CIPHERTEXT_SIZE;
-		return 1;
-	}
-
-	// ECCrefPublicKey <= SM2_KEY
-	ECCrefPublicKey_from_SM2_Z256_POINT(&eccPublicKey, &sm2_key->public_key);
-
-	// SDF_GenerateKeyWithEPK_ECC
-	if (SDF_OpenSession(dev->handle, &hSession) != SDR_OK) {
-		error_print();
-		return -1;
-	}
-	if (SDF_GenerateKeyWithEPK_ECC(hSession, 128, SGD_SM2_3, &eccPublicKey, &eccCipher, &hKey) != SDR_OK) {
-		(void)SDF_CloseSession(hSession);
-		error_print();
-		return -1;
-	}
-
-	// ECCCipher => SM2_CIPHERTEXT => DER
-	if (ECCCipher_to_SM2_CIPHERTEXT(&eccCipher, &ciphertext) != 1) {
-		(void)SDF_DestroyKey(hSession, hKey);
-		(void)SDF_CloseSession(hSession);
-		error_print();
-		return -1;
-	}
-	*wrappedkey_len = 0;
-	if (sm2_ciphertext_to_der(&ciphertext, &wrappedkey, wrappedkey_len) != 1) {
-		(void)SDF_DestroyKey(hSession, hKey);
-		(void)SDF_CloseSession(hSession);
-		error_print();
-		return -1;
-	}
-
-	key->session = hSession;
-	key->handle = hKey;
-	return 1;
-}
-
-int sdf_destroy_key(SDF_KEY *key)
-{
-	if (key) {
-		if (key->session && key->handle) {
-			if (SDF_DestroyKey(key->session, key->handle) != SDR_OK) {
+	if (deviceHandle != NULL) {
+		while (deviceHandle->session_list) {
+			if (SDF_CloseSession(deviceHandle->session_list) != SDR_OK) {
 				error_print();
-				return -1;
 			}
-			key->session = NULL;
-			key->handle = NULL;
-		}
-		if (key->session || key->handle) {
-			error_print();
-			return -1;
 		}
 	}
-	return 1;
+
+	memset(deviceHandle, 0, sizeof(SOFTSDF_DEVICE));
+	free(deviceHandle);
+	deviceHandle = NULL;
+
+	return SDR_OK;
 }
 
-// FIXME:
-// If SDF_ImportKeyWithISK_ECC does not need the GetPrivateKeyAccessRight
-// then we can use `key_index` or `SDF_PRIVATE_KEY` as arg
-// It's not secure to keep `pass` in memory
-int sdf_import_key(SDF_DEVICE *dev, unsigned int key_index, const char *pass,
-	const uint8_t *wrappedkey, size_t wrappedkey_len, SDF_KEY *key)
+
+int SDF_OpenSession(
+	void *hDeviceHandle,
+	void **phSessionHandle)
 {
-	void *hSession;
-	void *hKey;
-	ECCCipher eccCipher;
+	SOFTSDF_SESSION *session;
+
+	if (hDeviceHandle == NULL || hDeviceHandle != deviceHandle) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (phSessionHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (!(session = (SOFTSDF_SESSION *)malloc(sizeof(*session)))) {
+		error_print();
+		return SDR_GMSSLERR;
+	}
+	memset(session, 0, sizeof(*session));
+
+	// append session to session_list
+	if (deviceHandle->session_list == NULL) {
+		deviceHandle->session_list = session;
+	} else {
+		SOFTSDF_SESSION *current = deviceHandle->session_list;
+		while (current->next != NULL) {
+			current = current->next;
+		}
+		current->next = session;
+	}
+
+	*phSessionHandle = session;
+	return SDR_OK;
+}
+
+int SDF_CloseSession(
+	void *hSessionHandle)
+{
+	SOFTSDF_SESSION *current_session;
+	SOFTSDF_SESSION *prev_session;
+	SOFTSDF_CONTAINER *current_container;
+	SOFTSDF_CONTAINER *next_container;
+	SOFTSDF_KEY *current_key;
+	SOFTSDF_KEY *next_key;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	// find hSessionHandle in session_list
+	current_session = deviceHandle->session_list;
+	prev_session = NULL;
+	while (current_session != NULL && current_session != hSessionHandle) {
+		prev_session = current_session;
+		current_session = current_session->next;
+	}
+	if (current_session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	// free container_list
+	current_container = current_session->container_list;
+	while (current_container != NULL) {
+		next_container = current_container->next;
+		memset(current_container, 0, sizeof(*current_container));
+		free(current_container);
+		current_container = next_container;
+	}
+
+	// free key_list
+	current_key = current_session->key_list;
+	while (current_key != NULL) {
+		next_key = current_key->next;
+		// memset(current_key, 0, sizeof(*current_key));
+		// free(current_key);
+		current_key = next_key;
+	}
+
+	// delete current_session from session_list
+	if (prev_session == NULL) {
+		deviceHandle->session_list = current_session->next;
+	} else {
+		prev_session->next = current_session->next;
+	}
+	memset(current_session, 0, sizeof(*current_session));
+	free(current_session);
+
+	return SDR_OK;
+}
+
+#define SOFTSDF_DEV_DATE	"20240622"
+#define SOFTSDF_DEV_BATCH_NUM	"001" // as version.major
+#define SOFTSDF_DEV_SERIAL_NUM	"0200" // as version.minor
+#define SOFTSDF_DEV_SERIAL	SOFTSDF_DEV_DATE \
+				SOFTSDF_DEV_BATCH_NUM \
+				SOFTSDF_DEV_SERIAL_NUM
+
+int SDF_GetDeviceInfo(
+	void *hSessionHandle,
+	DEVICEINFO *pstDeviceInfo)
+{
+	SOFTSDF_SESSION *session;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pstDeviceInfo == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	memset(pstDeviceInfo, 0, sizeof(*pstDeviceInfo));
+	strncpy((char *)pstDeviceInfo->IssuerName, "GmSSL Project (http://gmssl.org)",
+		sizeof(pstDeviceInfo->IssuerName));
+	strncpy((char *)pstDeviceInfo->DeviceName, "Soft SDF",
+		sizeof(pstDeviceInfo->DeviceName));
+	strncpy((char *)pstDeviceInfo->DeviceSerial, SOFTSDF_DEV_SERIAL,
+		sizeof(pstDeviceInfo->DeviceSerial));
+	pstDeviceInfo->DeviceVersion = 1;
+	pstDeviceInfo->StandardVersion = 1;
+	pstDeviceInfo->AsymAlgAbility[0] = SGD_SM2_1|SGD_SM2_3;
+	pstDeviceInfo->AsymAlgAbility[1] = 256;
+	pstDeviceInfo->SymAlgAbility = SGD_SM4|SGD_CBC|SGD_MAC;
+#if ENABLE_SM4_ECB
+	pstDeviceInfo->SymAlgAbility |= SGD_ECB;
+#endif
+#if ENABLE_SM4_CFB
+	pstDeviceInfo->SymAlgAbility |= SGD_CFB;
+#endif
+#if ENABLE_SM4_OFB
+	pstDeviceInfo->SymAlgAbility |= SGD_OFB;
+#endif
+	pstDeviceInfo->HashAlgAbility = SGD_SM3;
+	pstDeviceInfo->BufferSize = 256*1024;
+
+	return SDR_OK;
+}
+
+int SDF_GenerateRandom(
+	void *hSessionHandle,
+	unsigned int uiLength,
+	unsigned char *pucRandom)
+{
+	SOFTSDF_SESSION *session;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_puts("Invalid session handle");
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucRandom == NULL || uiLength == 0) {
+		error_puts("Invalid output buffer or length");
+		return SDR_INARGERR;
+	}
+	if (uiLength > RAND_BYTES_MAX_SIZE) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (rand_bytes(pucRandom, uiLength) != 1) {
+		error_print();
+		return SDR_GMSSLERR;
+	}
+
+	return SDR_OK;
+}
+
+int SDF_GetPrivateKeyAccessRight(
+	void *hSessionHandle,
+	unsigned int uiKeyIndex,
+	unsigned char *pucPassword,
+	unsigned int uiPwdLength)
+{
+	int ret = SDR_OK;
+	SOFTSDF_SESSION *session;
+	SOFTSDF_CONTAINER *container = NULL;
+	char *pass = NULL;
+	char filename[FILENAME_MAX_LEN];
+	FILE *file = NULL;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_puts("Invalid session handle");
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucPassword == NULL || uiPwdLength == 0) {
+		error_puts("Invalid password or password length");
+		return SDR_INARGERR;
+	}
+	pass = (char *)malloc(uiPwdLength + 1);
+	if (pass == NULL) {
+		error_print();
+		return SDR_NOBUFFER;
+	}
+	memcpy(pass, pucPassword, uiPwdLength);
+	pass[uiPwdLength] = 0;
+	if (strlen(pass) != uiPwdLength) {
+		error_print();
+		ret = SDR_INARGERR;
+		goto end;
+	}
+
+	// create container
+	container = (SOFTSDF_CONTAINER *)malloc(sizeof(*container));
+	if (container == NULL) {
+		error_print();
+		ret = SDR_NOBUFFER;
+		goto end;
+	}
+	memset(container, 0, sizeof(*container));
+	container->key_index = uiKeyIndex;
+
+	// load sign_key
+	snprintf(filename, FILENAME_MAX_LEN, "sm2sign-%u.pem", uiKeyIndex);
+	file = fopen(filename, "r");
+	if (file == NULL) {
+		perror("Error opening file");
+		fprintf(stderr, "open failure %s\n", filename);
+		ret = SDR_KEYNOTEXIST;
+		goto end;
+	}
+	if (sm2_private_key_info_decrypt_from_pem(&container->sign_key, pass, file) != 1) {
+		error_print();
+		ret = SDR_GMSSLERR;
+		goto end;
+	}
+	fclose(file);
+
+	// load enc_key
+	snprintf(filename, FILENAME_MAX_LEN, "sm2enc-%u.pem", uiKeyIndex);
+	file = fopen(filename, "r");
+	if (file == NULL) {
+		perror("Error opening file");
+		ret = SDR_KEYNOTEXIST;
+		goto end;
+	}
+	if (sm2_private_key_info_decrypt_from_pem(&container->enc_key, pass, file) != 1) {
+		error_print();
+		ret = SDR_GMSSLERR;
+		goto end;
+	}
+
+	// append container to container_list
+	if (session->container_list == NULL) {
+		session->container_list = container;
+	} else {
+		SOFTSDF_CONTAINER *current = session->container_list;
+		while (current->next != NULL) {
+			current = current->next;
+		}
+		current->next = container;
+	}
+
+	container = NULL;
+	ret = SDR_OK;
+end:
+	if (container) {
+		memset(container, 0, sizeof(*container));
+		free(container);
+	}
+	if (pass) {
+		memset(pass, 0, uiPwdLength);
+		free(pass);
+	}
+	if (file) fclose(file);
+	return ret;
+}
+
+int SDF_ReleasePrivateKeyAccessRight(
+	void *hSessionHandle,
+	unsigned int uiKeyIndex)
+{
+	SOFTSDF_SESSION *session;
+	SOFTSDF_CONTAINER *current_container;
+	SOFTSDF_CONTAINER *prev_container;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_puts("Invalid session handle");
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	// delete container in container_list with uiKeyIndex
+	current_container = session->container_list;
+	prev_container = NULL;
+
+	while (current_container != NULL && current_container->key_index != uiKeyIndex) {
+		prev_container = current_container;
+		current_container = current_container->next;
+	}
+	if (current_container == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	if (prev_container == NULL) {
+		session->container_list = current_container->next;
+	} else {
+		prev_container->next = current_container->next;
+	}
+	memset(current_container, 0, sizeof(*current_container));
+	free(current_container);
+
+	return SDR_OK;
+}
+
+int SDF_ExportSignPublicKey_RSA(
+	void *hSessionHandle,
+	unsigned int uiKeyIndex,
+	RSArefPublicKey *pucPublicKey)
+{
+	error_print();
+	return SDR_NOTSUPPORT;
+}
+
+int SDF_ExportEncPublicKey_RSA(
+	void *hSessionHandle,
+	unsigned int uiKeyIndex,
+	RSArefPublicKey *pucPublicKey)
+{
+	error_print();
+	return SDR_NOTSUPPORT;
+}
+
+int SDF_GenerateKeyPair_RSA(
+	void *hSessionHandle,
+	unsigned int uiKeyBits,
+	RSArefPublicKey *pucPublicKey,
+	RSArefPrivateKey *pucPrivateKey)
+{
+	error_print();
+	return SDR_NOTSUPPORT;
+}
+
+int SDF_GenerateKeyWithIPK_RSA(
+	void *hSessionHandle,
+	unsigned int uiIPKIndex,
+	unsigned int uiKeyBits,
+	unsigned char *pucKey,
+	unsigned int *puiKeyLength,
+	void **phKeyHandle)
+{
+	error_print();
+	return SDR_NOTSUPPORT;
+}
+
+int SDF_GenerateKeyWithEPK_RSA(
+	void *hSessionHandle,
+	unsigned int uiKeyBits,
+	RSArefPublicKey *pucPublicKey,
+	unsigned char *pucKey,
+	unsigned int *puiKeyLength,
+	void **phKeyHandle)
+{
+	error_print();
+	return SDR_NOTSUPPORT;
+}
+
+int SDF_ImportKeyWithISK_RSA(
+	void *hSessionHandle,
+	unsigned int uiISKIndex,
+	unsigned char *pucKey,
+	unsigned int uiKeyLength,
+	void **phKeyHandle)
+{
+	error_print();
+	return SDR_NOTSUPPORT;
+}
+
+int SDF_ExchangeDigitEnvelopeBaseOnRSA(
+	void *hSessionHandle,
+	unsigned int uiKeyIndex,
+	RSArefPublicKey *pucPublicKey,
+	unsigned char *pucDEInput,
+	unsigned int uiDELength,
+	unsigned char *pucDEOutput,
+	unsigned int *puiDELength)
+{
+	error_print();
+	return SDR_NOTSUPPORT;
+}
+
+int SDF_ExportSignPublicKey_ECC(
+	void *hSessionHandle,
+	unsigned int uiKeyIndex,
+	ECCrefPublicKey *pucPublicKey)
+{
+	SOFTSDF_SESSION *session;
+	char filename[FILENAME_MAX_LEN];
+	FILE *file = NULL;
+	SM2_KEY sm2_key;
+	SM2_POINT point;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_puts("Invalid session handle");
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	snprintf(filename, FILENAME_MAX_LEN, "sm2signpub-%u.pem", uiKeyIndex);
+	file = fopen(filename, "rb");
+	if (file == NULL) {
+		error_print();
+		return SDR_KEYNOTEXIST;
+	}
+	if (sm2_public_key_info_from_pem(&sm2_key, file) != 1) {
+		error_print();
+		fclose(file);
+		return SDR_KEYNOTEXIST;
+	}
+	fclose(file);
+
+	if (pucPublicKey == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	sm2_z256_point_to_bytes(&sm2_key.public_key, (uint8_t *)&point);
+
+	pucPublicKey->bits = 256;
+	memset(pucPublicKey->x, 0, ECCref_MAX_LEN - 32);
+	memcpy(pucPublicKey->x + ECCref_MAX_LEN - 32, point.x, 32);
+	memset(pucPublicKey->y, 0, ECCref_MAX_LEN - 32);
+	memcpy(pucPublicKey->y + ECCref_MAX_LEN - 32, point.y, 32);
+
+	return SDR_OK;
+}
+
+int SDF_ExportEncPublicKey_ECC(
+	void *hSessionHandle,
+	unsigned int uiKeyIndex,
+	ECCrefPublicKey *pucPublicKey)
+{
+	SOFTSDF_SESSION *session;
+	char filename[FILENAME_MAX_LEN];
+	FILE *file = NULL;
+	SM2_KEY sm2_key;
+	SM2_POINT point;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_puts("Invalid session handle");
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	snprintf(filename, FILENAME_MAX_LEN, "sm2encpub-%u.pem", uiKeyIndex);
+	file = fopen(filename, "rb");
+	if (file == NULL) {
+		error_print();
+		return SDR_KEYNOTEXIST;
+	}
+	if (sm2_public_key_info_from_pem(&sm2_key, file) != 1) {
+		error_print();
+		fclose(file);
+		return SDR_KEYNOTEXIST;
+	}
+	fclose(file);
+
+	if (pucPublicKey == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	sm2_z256_point_to_bytes(&sm2_key.public_key, (uint8_t *)&point);
+
+	pucPublicKey->bits = 256;
+	memset(pucPublicKey->x, 0, ECCref_MAX_LEN - 32);
+	memcpy(pucPublicKey->x + ECCref_MAX_LEN - 32, point.x, 32);
+	memset(pucPublicKey->y, 0, ECCref_MAX_LEN - 32);
+	memcpy(pucPublicKey->y + ECCref_MAX_LEN - 32, point.y, 32);
+
+	return SDR_OK;
+}
+
+int SDF_GenerateKeyPair_ECC(
+	void *hSessionHandle,
+	unsigned int uiAlgID,
+	unsigned int uiKeyBits,
+	ECCrefPublicKey *pucPublicKey,
+	ECCrefPrivateKey *pucPrivateKey)
+{
+	SOFTSDF_SESSION *session;
+	SM2_KEY sm2_key;
+	SM2_POINT public_key;
+	uint8_t private_key[32];
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_puts("Invalid session handle");
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (uiAlgID != SGD_SM2_1 && uiAlgID != SGD_SM2_3) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (uiKeyBits != 256) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucPublicKey == NULL || pucPrivateKey == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (sm2_key_generate(&sm2_key) != 1) {
+		error_print();
+		return SDR_GMSSLERR;
+	}
+
+	sm2_z256_to_bytes(sm2_key.private_key, private_key);
+	sm2_z256_point_to_bytes(&sm2_key.public_key, (uint8_t *)&public_key);
+
+	memset(pucPublicKey, 0, sizeof(*pucPublicKey));
+	pucPublicKey->bits = 256;
+	memcpy(pucPublicKey->x + ECCref_MAX_LEN - 32, public_key.x, 32);
+	memcpy(pucPublicKey->y + ECCref_MAX_LEN - 32, public_key.y, 32);
+
+	memset(pucPrivateKey, 0, sizeof(*pucPrivateKey));
+	pucPrivateKey->bits = 256;
+	memcpy(pucPrivateKey->K + ECCref_MAX_LEN - 32, private_key, 32);
+
+	memset(&sm2_key, 0, sizeof(sm2_key));
+	memset(private_key, 0, sizeof(private_key));
+	return SDR_OK;
+}
+
+int SDF_GenerateKeyWithIPK_ECC(
+	void *hSessionHandle,
+	unsigned int uiIPKIndex,
+	unsigned int uiKeyBits,
+	ECCCipher *pucKey,
+	void **phKeyHandle)
+{
+	SOFTSDF_SESSION *session;
+	char filename[FILENAME_MAX_LEN];
+	FILE *file;
+	SM2_KEY sm2_key;
+	SOFTSDF_KEY *key;
+	SM2_CIPHERTEXT ctxt;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_puts("Invalid session handle");
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	snprintf(filename, FILENAME_MAX_LEN, "sm2encpub-%u.pem", uiIPKIndex);
+	file = fopen(filename, "rb");
+	if (file == NULL) {
+		error_print();
+		return SDR_KEYNOTEXIST;
+	}
+	if (sm2_public_key_info_from_pem(&sm2_key, file) != 1) {
+		error_print();
+		fclose(file);
+		return SDR_KEYNOTEXIST;
+	}
+	fclose(file);
+
+	if (uiKeyBits%8 != 0 || uiKeyBits/8 > SOFTSDF_MAX_KEY_SIZE) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucKey == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (phKeyHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	// generate key
+	key = (SOFTSDF_KEY *)malloc(sizeof(*key));
+	if (key == NULL) {
+		error_print();
+		return SDR_NOBUFFER;
+	}
+	memset(key, 0, sizeof(*key));
+	if (rand_bytes(key->key, uiKeyBits/8) != 1) {
+		error_print();
+		free(key);
+		return SDR_GMSSLERR;
+	}
+	key->key_size = uiKeyBits/8;
+
+	// encrypt key with container
+	if (sm2_do_encrypt(&sm2_key, key->key, key->key_size, &ctxt) != 1) {
+		error_print();
+		free(key);
+		return SDR_GMSSLERR;
+	}
+	memset(pucKey, 0, sizeof(*pucKey));
+	memcpy(pucKey->x + ECCref_MAX_LEN - 32, ctxt.point.x, 32);
+	memcpy(pucKey->y + ECCref_MAX_LEN - 32, ctxt.point.y, 32);
+	memcpy(pucKey->M, ctxt.hash, 32);
+	pucKey->L = ctxt.ciphertext_size;
+	memcpy(pucKey->C, ctxt.ciphertext, ctxt.ciphertext_size);
+
+	// append key to key_list
+	if (session->key_list == NULL) {
+		session->key_list = key;
+	} else {
+		SOFTSDF_KEY *current = session->key_list;
+		while (current->next != NULL) {
+			current = current->next;
+		}
+		current->next = key;
+	}
+
+	*phKeyHandle = key;
+	return SDR_OK;
+}
+
+int SDF_GenerateKeyWithEPK_ECC(
+	void *hSessionHandle,
+	unsigned int uiKeyBits,
+	unsigned int uiAlgID,
+	ECCrefPublicKey *pucPublicKey,
+	ECCCipher *pucKey,
+	void **phKeyHandle)
+{
+	SOFTSDF_SESSION *session;
+	SM2_POINT point;
+	SM2_Z256_POINT public_key;
+	SM2_KEY sm2_key;
+	SOFTSDF_KEY *key;
+	SM2_CIPHERTEXT ctxt;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_puts("Invalid session handle");
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (uiKeyBits%8 != 0 || uiKeyBits/8 > SOFTSDF_MAX_KEY_SIZE) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (uiAlgID != SGD_SM2_3) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucPublicKey == NULL || pucKey == NULL || phKeyHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	// load public key
+	memset(&point, 0, sizeof(point));
+	memcpy(point.x, pucPublicKey->x + ECCref_MAX_LEN - 32, 32);
+	memcpy(point.y, pucPublicKey->y + ECCref_MAX_LEN - 32, 32);
+	if (sm2_z256_point_from_bytes(&public_key, (uint8_t *)&point) != 1) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	if (sm2_key_set_public_key(&sm2_key, &public_key) != 1) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	// generate key
+	key = (SOFTSDF_KEY *)malloc(sizeof(*key));
+	if (key == NULL) {
+		error_print();
+		return SDR_NOBUFFER;
+	}
+	memset(key, 0, sizeof(*key));
+	if (rand_bytes(key->key, uiKeyBits/8) != 1) {
+		error_print();
+		free(key);
+		return SDR_GMSSLERR;
+	}
+	key->key_size = uiKeyBits/8;
+
+	// encrypt key with external public key
+	if (sm2_do_encrypt(&sm2_key, key->key, key->key_size, &ctxt) != 1) {
+		error_print();
+		free(key);
+		return SDR_GMSSLERR;
+	}
+	memset(pucKey, 0, sizeof(*pucKey));
+	memcpy(pucKey->x + ECCref_MAX_LEN - 32, ctxt.point.x, 32);
+	memcpy(pucKey->y + ECCref_MAX_LEN - 32, ctxt.point.y, 32);
+	memcpy(pucKey->M, ctxt.hash, 32);
+	pucKey->L = ctxt.ciphertext_size;
+	memcpy(pucKey->C, ctxt.ciphertext, ctxt.ciphertext_size);
+
+
+
+
+	// append key to key_list
+	if (session->key_list == NULL) {
+		session->key_list = key;
+	} else {
+		SOFTSDF_KEY *current = session->key_list;
+		while (current->next != NULL) {
+			current = current->next;
+		}
+		current->next = key;
+	}
+
+	*phKeyHandle = key;
+	return SDR_OK;
+}
+
+int SDF_ImportKeyWithISK_ECC(
+	void *hSessionHandle,
+	unsigned int uiISKIndex,
+	ECCCipher *pucKey,
+	void **phKeyHandle)
+{
+	SOFTSDF_SESSION *session;
+	SOFTSDF_CONTAINER *container;
+	SM2_CIPHERTEXT ctxt;
+	SOFTSDF_KEY *key;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_puts("Invalid session handle");
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	container = session->container_list;
+	while (container != NULL && container->key_index != uiISKIndex) {
+		container = container->next;
+	}
+	if (container == NULL) {
+		error_puts("ISK not loaded, call GetPrivateKeyAccess before use ISK\n");
+		return SDR_INARGERR;
+	}
+
+	if (pucKey == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	if (pucKey->L > SM2_MAX_PLAINTEXT_SIZE) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	if (pucKey->L > SOFTSDF_MAX_KEY_SIZE) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (phKeyHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	// create key
+	key = (SOFTSDF_KEY *)malloc(sizeof(*key));
+	if (key == NULL) {
+		error_print();
+		return SDR_NOBUFFER;
+	}
+	memset(key, 0, sizeof(*key));
+
+	// decrypt key
+	memset(&ctxt, 0, sizeof(ctxt));
+	memcpy(ctxt.point.x, pucKey->x + ECCref_MAX_LEN - 32, 32);
+	memcpy(ctxt.point.y, pucKey->y + ECCref_MAX_LEN - 32, 32);
+	memcpy(ctxt.hash, pucKey->M, 32);
+	memcpy(ctxt.ciphertext, pucKey->C, pucKey->L);
+	ctxt.ciphertext_size = pucKey->L;
+
+	if (sm2_do_decrypt(&container->enc_key, &ctxt, key->key, &key->key_size) != 1) {
+		error_print();
+		free(key);
+		return SDR_GMSSLERR;
+	}
+
+	// append key to key_list
+	if (session->key_list == NULL) {
+		session->key_list = key;
+	} else {
+		SOFTSDF_KEY *current = session->key_list;
+		while (current->next != NULL) {
+			current = current->next;
+		}
+		current->next = key;
+	}
+
+	*phKeyHandle = key;
+	return SDR_OK;
+}
+
+int SDF_GenerateAgreementDataWithECC(
+	void *hSessionHandle,
+	unsigned int uiISKIndex,
+	unsigned int uiKeyBits,
+	unsigned char *pucSponsorID,
+	unsigned int uiSponsorIDLength,
+	ECCrefPublicKey *pucSponsorPublicKey,
+	ECCrefPublicKey *pucSponsorTmpPublicKey,
+	void **phAgreementHandle)
+{
+	error_print();
+	return SDR_NOTSUPPORT;
+}
+
+int SDF_GenerateKeyWithECC(
+	void *hSessionHandle,
+	unsigned char *pucResponseID,
+	unsigned int uiResponseIDLength,
+	ECCrefPublicKey *pucResponsePublicKey,
+	ECCrefPublicKey *pucResponseTmpPublicKey,
+	void *hAgreementHandle,
+	void **phKeyHandle)
+{
+	error_print();
+	return SDR_NOTSUPPORT;
+}
+
+int SDF_GenerateAgreementDataAndKeyWithECC(
+	void *hSessionHandle,
+	unsigned int uiISKIndex,
+	unsigned int uiKeyBits,
+	unsigned char *pucResponseID,
+	unsigned int uiResponseIDLength,
+	unsigned char *pucSponsorID,
+	unsigned int uiSponsorIDLength,
+	ECCrefPublicKey *pucSponsorPublicKey,
+	ECCrefPublicKey *pucSponsorTmpPublicKey,
+	ECCrefPublicKey *pucResponsePublicKey,
+	ECCrefPublicKey *pucResponseTmpPublicKey,
+	void **phKeyHandle)
+{
+	error_print();
+	return SDR_NOTSUPPORT;
+}
+
+int SDF_ExchangeDigitEnvelopeBaseOnECC(
+	void *hSessionHandle,
+	unsigned int uiKeyIndex,
+	unsigned int uiAlgID,
+	ECCrefPublicKey *pucPublicKey,
+	ECCCipher *pucEncDataIn,
+	ECCCipher *pucEncDataOut)
+{
+	error_print();
+	return SDR_NOTSUPPORT;
+}
+
+// XXX: `SDF_GenerateKeyWithKEK` use CBC-Padding, so the `pucKey` can not be decrypted by `SDF_Decrypt`
+int SDF_GenerateKeyWithKEK(
+	void *hSessionHandle,
+	unsigned int uiKeyBits,
+	unsigned int uiAlgID,
+	unsigned int uiKEKIndex,
+	unsigned char *pucKey,
+	unsigned int *puiKeyLength,
+	void **phKeyHandle)
+{
+	SOFTSDF_SESSION *session;
+	char filename[FILENAME_MAX_LEN];
+	FILE *file;
+	uint8_t kek[16];
+	SM4_KEY sm4_key;
+	uint8_t *iv;
+	uint8_t *enced;
+	size_t enced_len;
+	SOFTSDF_KEY *key;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (uiKeyBits % 8 != 0 || uiKeyBits/8 > SOFTSDF_MAX_KEY_SIZE) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (uiAlgID != SGD_SM4_CBC) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	// load KEK file with index
+	snprintf(filename, FILENAME_MAX_LEN, "/var/sdf/kek-%u.key", uiKEKIndex);
+	file = fopen(filename, "rb");
+	if (file == NULL) {
+		fprintf(stderr, "open file: %s\n", filename);
+		error_print();
+		return SDR_KEYNOTEXIST;
+	}
+
+	size_t rlen;
+	if ((rlen = fread(kek, 1, sizeof(kek), file)) != sizeof(kek)) {
+
+
+		printf("rlen = %zu\n", rlen);
+		perror("fread");
+		error_print();
+		fclose(file);
+		return SDR_INARGERR;
+	}
+	fclose(file);
+
+	if (pucKey == NULL || puiKeyLength == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (phKeyHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	// generate key
+	key = (SOFTSDF_KEY *)malloc(sizeof(SOFTSDF_KEY));
+	if (key == NULL) {
+		error_print();
+		return SDR_GMSSLERR;
+	}
+	memset(key, 0, sizeof(*key));
+
+	iv = pucKey;
+	enced = pucKey + SM4_BLOCK_SIZE;
+
+	if (rand_bytes(iv, SM4_BLOCK_SIZE) != 1) {
+		error_print();
+		return SDR_GMSSLERR;
+	}
+
+	key->key_size = uiKeyBits/8;
+	if (rand_bytes(key->key, key->key_size) != 1) {
+		error_print();
+		free(key);
+		return SDR_GMSSLERR;
+	}
+
+	sm4_set_encrypt_key(&sm4_key, kek);
+	if (sm4_cbc_padding_encrypt(&sm4_key, iv, key->key, key->key_size, enced, &enced_len) != 1) {
+		error_print();
+		memset(&sm4_key, 0, sizeof(sm4_key));
+		free(key);
+		return SDR_GMSSLERR;
+	}
+	memset(&sm4_key, 0, sizeof(sm4_key));
+	*puiKeyLength = 16 + enced_len;
+
+	// append key to key_list
+	if (session->key_list == NULL) {
+		session->key_list = key;
+	} else {
+		SOFTSDF_KEY *current = session->key_list;
+		while (current->next != NULL) {
+			current = current->next;
+		}
+		current->next = key;
+	}
+
+	*phKeyHandle = key;
+	return SDR_OK;
+}
+
+int SDF_ImportKeyWithKEK(
+	void *hSessionHandle,
+	unsigned int uiAlgID,
+	unsigned int uiKEKIndex,
+	unsigned char *pucKey,
+	unsigned int uiKeyLength,
+	void **phKeyHandle)
+{
+	SOFTSDF_SESSION *session;
+	char filename[FILENAME_MAX_LEN];
+	FILE *file;
+	uint8_t kek[16];
+	SM4_KEY sm4_key;
+	const uint8_t *iv;
+	const uint8_t *enced;
+	size_t enced_len;
+	SOFTSDF_KEY *key;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (uiAlgID != SGD_SM4_CBC) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	// load KEK file with index
+	snprintf(filename, FILENAME_MAX_LEN, "/var/sdf/kek-%u.key", uiKEKIndex);
+	file = fopen(filename, "rb");
+	if (file == NULL) {
+		error_print();
+		return SDR_KEYNOTEXIST;
+	}
+	if (fread(kek, 1, sizeof(kek), file) != sizeof(kek)) {
+		error_print();
+		fclose(file);
+		return SDR_INARGERR;
+	}
+	fclose(file);
+
+
+	// decrypt SM4-CBC encrypted pucKey
+	if (pucKey == NULL || uiKeyLength <= SM4_BLOCK_SIZE) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	if (uiKeyLength > SM4_BLOCK_SIZE + SOFTSDF_MAX_KEY_SIZE) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	key = (SOFTSDF_KEY *)malloc(sizeof(SOFTSDF_KEY));
+	if (key == NULL) {
+		error_print();
+		return SDR_GMSSLERR;
+	}
+	memset(key, 0, sizeof(*key));
+
+	iv = pucKey;
+	enced = pucKey + SM4_BLOCK_SIZE;
+	enced_len = uiKeyLength - SM4_BLOCK_SIZE;
+
+	sm4_set_decrypt_key(&sm4_key, kek);
+	if (sm4_cbc_padding_decrypt(&sm4_key, iv, enced, enced_len, key->key, &key->key_size) != 1) {
+		error_print();
+		memset(&sm4_key, 0, sizeof(sm4_key));
+		free(key);
+		return SDR_GMSSLERR;
+	}
+	memset(&sm4_key, 0, sizeof(sm4_key));
+
+	// append key to key_list
+	if (session->key_list == NULL) {
+		session->key_list = key;
+	} else {
+		SOFTSDF_KEY *current = session->key_list;
+		while (current->next != NULL) {
+			current = current->next;
+		}
+		current->next = key;
+	}
+
+	*phKeyHandle = key;
+	return SDR_OK;
+}
+
+int SDF_ImportKey(
+	void *hSessionHandle,
+	unsigned char *pucKey,
+	unsigned int uiKeyLength,
+	void **phKeyHandle)
+{
+	SOFTSDF_SESSION *session;
+	SOFTSDF_KEY *key;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	// decrypt SM4-CBC encrypted pucKey
+	// if (pucKey == NULL || uiKeyLength <= SM4_BLOCK_SIZE) {
+	// 	fprintf(stderr, "%d %d %d", pucKey== NULL, uiKeyLength , SM4_BLOCK_SIZE);
+	// 	error_print();
+	// 	return SDR_INARGERR;
+	// }
+	// if (uiKeyLength > SM4_BLOCK_SIZE + SOFTSDF_MAX_KEY_SIZE) {
+	// 	error_print();
+	// 	return SDR_INARGERR;
+	// }
+
+	key = (SOFTSDF_KEY *)malloc(sizeof(SOFTSDF_KEY));
+	if (key == NULL) {
+		error_print();
+		return SDR_GMSSLERR;
+	}
+	memset(key, 0, sizeof(*key));
+
+	memcpy(key->key, pucKey, uiKeyLength);
+	key->key_size = uiKeyLength;
+
+	// append key to key_list
+	if (session->key_list == NULL) {
+		session->key_list = key;
+	} else {
+		SOFTSDF_KEY *current = session->key_list;
+		while (current->next != NULL) {
+			current = current->next;
+		}
+		current->next = key;
+	}
+
+	*phKeyHandle = key;
+	return SDR_OK;
+}
+
+
+int SDF_DestroyKey(
+	void *hSessionHandle,
+	void *hKeyHandle)
+{
+	SOFTSDF_SESSION *session;
+	SOFTSDF_KEY *current;
+	SOFTSDF_KEY *prev;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (hKeyHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	current = session->key_list;
+	{
+		assert(current != NULL);
+	}
+	prev = NULL;
+	while (current != NULL && current != (SOFTSDF_KEY *)hKeyHandle) {
+		prev = current;
+		current = current->next;
+	}
+	if (current == NULL) {
+		error_print();
+		return SDR_KEYNOTEXIST;
+	}
+	if (prev == NULL) {
+		session->key_list = current->next;
+	} else {
+		prev->next = current->next;
+	}
+	memset(current, 0, sizeof(SOFTSDF_KEY));
+	free(current);
+
+	return SDR_OK;
+}
+
+int SDF_ExternalPublicKeyOperation_RSA(
+	void *hSessionHandle,
+	RSArefPublicKey *pucPublicKey,
+	unsigned char *pucDataInput,
+	unsigned int uiInputLength,
+	unsigned char *pucDataOutput,
+	unsigned int *puiOutputLength)
+{
+	error_print();
+	return SDR_NOTSUPPORT;
+}
+
+int SDF_ExternalPrivateKeyOperation_RSA(
+	void *hSessionHandle,
+	RSArefPrivateKey *pucPrivateKey,
+	unsigned char *pucDataInput,
+	unsigned int uiInputLength,
+	unsigned char *pucDataOutput,
+	unsigned int *puiOutputLength)
+{
+	error_print();
+	return SDR_NOTSUPPORT;
+}
+
+int SDF_InternalPrivateKeyOperation_RSA(
+	void *hSessionHandle,
+	unsigned int uiKeyIndex,
+	unsigned char *pucDataInput,
+	unsigned int uiInputLength,
+	unsigned char *pucDataOutput,
+	unsigned int *puiOutputLength)
+{
+	error_print();
+	return SDR_NOTSUPPORT;
+}
+
+int SDF_ExternalVerify_ECC(
+	void *hSessionHandle,
+	unsigned int uiAlgID,
+	ECCrefPublicKey *pucPublicKey,
+	unsigned char *pucDataInput,
+	unsigned int uiInputLength,
+	ECCSignature *pucSignature)
+{
+	SOFTSDF_SESSION *session;
+	SM2_POINT point;
+	SM2_Z256_POINT public_key;
+	SM2_KEY sm2_key;
+	SM2_SIGNATURE sig;
+	unsigned int i;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (uiAlgID != SGD_SM2_1) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucPublicKey == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucPublicKey->bits != 256) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	// load public key
+	memset(&point, 0, sizeof(point));
+	memcpy(point.x, pucPublicKey->x + ECCref_MAX_LEN - 32, 32);
+	memcpy(point.y, pucPublicKey->y + ECCref_MAX_LEN - 32, 32);
+	if (sm2_z256_point_from_bytes(&public_key, (uint8_t *)&point) != 1) {
+		error_print();
+		return -1;
+	}
+	if (sm2_key_set_public_key(&sm2_key, &public_key) != 1) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucDataInput == NULL || uiInputLength != 32) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucSignature == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	for (i = 0; i < ECCref_MAX_LEN - 32; i++) {
+		if (pucSignature->r[i] != 0) {
+			error_print();
+			return SDR_INARGERR;
+		}
+	}
+	for (i = 0; i < ECCref_MAX_LEN - 32; i++) {
+		if (pucSignature->s[i] != 0) {
+			error_print();
+			return SDR_INARGERR;
+		}
+	}
+
+	memcpy(sig.r, pucSignature->r + ECCref_MAX_LEN - 32, 32);
+	memcpy(sig.s, pucSignature->s + ECCref_MAX_LEN - 32, 32);
+
+	if (sm2_do_verify(&sm2_key, pucDataInput, &sig) != 1) {
+		error_print();
+		return SDR_VERIFYERR;
+	}
+
+	return SDR_OK;
+}
+
+int SDF_InternalSign_ECC(
+	void *hSessionHandle,
+	unsigned int uiISKIndex,
+	unsigned char *pucData,
+	unsigned int uiDataLength,
+	ECCSignature *pucSignature)
+{
+	SOFTSDF_SESSION *session;
+	SOFTSDF_CONTAINER *container;
+	SM2_SIGNATURE sig;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (!hSessionHandle) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	// find container with key index
+	container = session->container_list;
+	while (container != NULL && container->key_index != uiISKIndex) {
+		container = container->next;
+	}
+	if (container == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucData == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (uiDataLength != SM3_DIGEST_SIZE) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucSignature == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (sm2_do_sign(&container->sign_key, pucData, &sig) != 1) {
+		error_print();
+		return SDR_GMSSLERR;
+	}
+
+	memset(pucSignature, 0, sizeof(*pucSignature));
+	memcpy(pucSignature->r + ECCref_MAX_LEN - 32, sig.r, 32);
+	memcpy(pucSignature->s + ECCref_MAX_LEN - 32, sig.s, 32);
+
+	return SDR_OK;
+}
+
+int SDF_InternalVerify_ECC(
+	void *hSessionHandle,
+	unsigned int uiIPKIndex,
+	unsigned char *pucData,
+	unsigned int uiDataLength,
+	ECCSignature *pucSignature)
+{
+	SOFTSDF_SESSION *session;
+	char filename[FILENAME_MAX_LEN];
+	FILE *file = NULL;
+	SM2_KEY sm2_key;
+	SM2_SIGNATURE sig;
+	unsigned int i;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (!hSessionHandle) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	// load public key from file
+	snprintf(filename, FILENAME_MAX_LEN, "sm2signpub-%u.pem", uiIPKIndex);
+	file = fopen(filename, "rb");
+	if (file == NULL) {
+		error_print();
+		return SDR_KEYNOTEXIST;
+	}
+	if (sm2_public_key_info_from_pem(&sm2_key, file) != 1) {
+		error_print();
+		fclose(file);
+		return SDR_KEYNOTEXIST;
+	}
+	fclose(file);
+
+	if (pucData == NULL || uiDataLength != SM3_DIGEST_SIZE) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucSignature == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	for (i = 0; i < ECCref_MAX_LEN - 32; i++) {
+		if (pucSignature->r[i] != 0) {
+			error_print();
+			return SDR_INARGERR;
+		}
+	}
+	for (i = 0; i < ECCref_MAX_LEN - 32; i++) {
+		if (pucSignature->s[i] != 0) {
+			error_print();
+			return SDR_INARGERR;
+		}
+	}
+
+	memcpy(sig.r, pucSignature->r + ECCref_MAX_LEN - 32, 32);
+	memcpy(sig.s, pucSignature->s + ECCref_MAX_LEN - 32, 32);
+
+	if (sm2_do_verify(&sm2_key, pucData, &sig) != 1) {
+		error_print();
+		return SDR_VERIFYERR;
+	}
+
+	return SDR_OK;
+}
+
+int SDF_ExternalEncrypt_ECC(
+	void *hSessionHandle,
+	unsigned int uiAlgID,
+	ECCrefPublicKey *pucPublicKey,
+	unsigned char *pucData,
+	unsigned int uiDataLength,
+	ECCCipher *pucEncData)
+{
+	SOFTSDF_SESSION *session;
+	SM2_POINT point;
+	SM2_Z256_POINT public_key;
+	SM2_KEY sm2_key;
+	SM2_CIPHERTEXT ctxt;
+	unsigned int i;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (!hSessionHandle) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (uiAlgID != SGD_SM2_3) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucPublicKey == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucPublicKey->bits != 256) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	for (i = 0; i < ECCref_MAX_LEN - 32; i++) {
+		if (pucPublicKey->x[i] != 0) {
+			error_print();
+			return SDR_INARGERR;
+		}
+	}
+	for (i = 0; i < ECCref_MAX_LEN - 32; i++) {
+		if (pucPublicKey->y[i] != 0) {
+			error_print();
+			return SDR_INARGERR;
+		}
+	}
+
+	// parse public key
+	memset(&point, 0, sizeof(point));
+	memcpy(point.x, pucPublicKey->x + ECCref_MAX_LEN - 32, 32);
+	memcpy(point.y, pucPublicKey->y + ECCref_MAX_LEN - 32, 32);
+	if (sm2_z256_point_from_bytes(&public_key, (uint8_t *)&point) != 1) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	if (sm2_key_set_public_key(&sm2_key, &public_key) != 1) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (!pucData) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if(uiDataLength <=0 || uiDataLength > SM2_MAX_PLAINTEXT_SIZE) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (sm2_do_encrypt(&sm2_key, pucData, uiDataLength, &ctxt) != 1) {
+		error_print();
+		return SDR_GMSSLERR;
+	}
+
+	memset(pucEncData, 0, sizeof(*pucEncData));
+	memcpy(pucEncData->x + ECCref_MAX_LEN - 32, ctxt.point.x, 32);
+	memcpy(pucEncData->y + ECCref_MAX_LEN - 32, ctxt.point.y, 32);
+	memcpy(pucEncData->M, ctxt.hash, 32);
+	pucEncData->L = ctxt.ciphertext_size;
+	memcpy(pucEncData->C, ctxt.ciphertext, ctxt.ciphertext_size);
+
+	return SDR_OK;
+}
+
+int SDF_Encrypt(
+	void *hSessionHandle,
+	void *hKeyHandle,
+	unsigned int uiAlgID,
+	unsigned char *pucIV, // XXX: IV is updated after calling
+	unsigned char *pucData,
+	unsigned int uiDataLength,
+	unsigned char *pucEncData,
+	unsigned int *puiEncDataLength)
+{
+	// SOFTSDF_SESSION *session;
+	SOFTSDF_KEY *key;
+	SM4_KEY sm4_key;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	// if (!hSessionHandle) {
+	// 	error_print();
+	// 	return SDR_INARGERR;
+	// }
+	// session = deviceHandle->session_list;
+	// while (session != NULL && session != hSessionHandle) {
+	// 	session = session->next;
+	// }
+	// if (session == NULL) {
+	// 	error_print();
+	// 	return SDR_INARGERR;
+	// }
+
+	if (hKeyHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	// key = session->key_list;
+	// while (key != NULL && key != (SOFTSDF_KEY *)hKeyHandle) {
+	// 	key = key->next;
+	// }
+
+
+	key = hKeyHandle;
+
+	if (key == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	if (key->key_size < SM4_KEY_SIZE) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucData == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (puiEncDataLength == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	switch (uiAlgID) {
+	case SGD_SM4_CBC:
+		if (pucIV == NULL) {
+			error_print();
+			return SDR_INARGERR;
+		}
+		if (uiDataLength % 16) {
+			error_print();
+			return SDR_INARGERR;
+		}
+		break;
+#if ENABLE_SM4_ECB
+	case SGD_SM4_ECB:
+		if (uiDataLength % 16) {
+			error_print();
+			return SDR_INARGERR;
+		}
+		break;
+#endif
+#if ENABLE_SM4_CFB
+	case SGD_SM4_CFB:
+		if (pucIV == NULL) {
+			error_print();
+			return SDR_INARGERR;
+		}
+		break;
+#endif
+#if ENABLE_SM4_OFB
+	case SGD_SM4_OFB:
+		if (pucIV == NULL) {
+			error_print();
+			return SDR_INARGERR;
+		}
+		break;
+#endif
+	default:
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	// XXX: change this when add CBC-Padding mode
+	*puiEncDataLength = uiDataLength;
+
+	if (pucEncData == NULL) {
+		return SDR_OK;
+	}
+
+	// TODO: cache `SM4_KEY` in `SOFTSDF_KEY`, reduce cost of calling `sm4_set_encrypt_key`
+	sm4_set_encrypt_key(&sm4_key, key->key);
+
+	switch (uiAlgID) {
+	case SGD_SM4_CBC:
+		sm4_cbc_encrypt_blocks(&sm4_key, pucIV, pucData, uiDataLength/16, pucEncData);
+		break;
+#if ENALBE_SM4_ECB
+	case SGD_SM4_ECB:
+		sm4_encrypt_blocks(&sm4_key, pucData, uiDataLength/16, pucEncData);
+		break;
+#endif
+#if ENALBE_SM4_CFB
+	case SGD_SM4_CFB:
+		sm4_cfb_encrypt(&sm4_key, SM4_CFB_128, pucIV, pucData, uiDataLength, pucEncData);
+		break;
+#endif
+#if ENALBE_SM4_OFB
+	case SGD_SM4_OFB:
+		sm4_ofb_encrypt(&sm4_key, pucIV, pucData, uiDataLength, pucEncData);
+		break;
+#endif
+	default:
+		gmssl_secure_clear(&sm4_key, sizeof(sm4_key));
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	gmssl_secure_clear(&sm4_key, sizeof(sm4_key));
+
+	return SDR_OK;
+}
+
+int SDF_Decrypt(
+	void *hSessionHandle,
+	void *hKeyHandle,
+	unsigned int uiAlgID,
+	unsigned char *pucIV, // XXX: IV is updated after calling
+	unsigned char *pucEncData,
+	unsigned int uiEncDataLength,
+	unsigned char *pucData,
+	unsigned int *puiDataLength)
+{
+	// SOFTSDF_SESSION *session;
+	SOFTSDF_KEY *key;
+	SM4_KEY sm4_key;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	// if (!hSessionHandle) {
+	// 	error_print();
+	// 	return SDR_INARGERR;
+	// }
+	// session = deviceHandle->session_list;
+	// while (session != NULL && session != hSessionHandle) {
+	// 	session = session->next;
+	// }
+	// if (session == NULL) {
+	// 	error_print();
+	// 	return SDR_INARGERR;
+	// }
+
+	if (hKeyHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	// key = session->key_list;
+	// while (key != NULL && key != (SOFTSDF_KEY *)hKeyHandle) {
+	// 	key = key->next;
+	// }
+	key = hKeyHandle;
+	if (key == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	if (key->key_size < SM4_KEY_SIZE) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucEncData == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (puiDataLength == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	switch (uiAlgID) {
+	case SGD_SM4_CBC:
+		if (pucIV == NULL) {
+			error_print();
+			return SDR_INARGERR;
+		}
+		if (uiEncDataLength % 16) {
+			error_print();
+			return SDR_INARGERR;
+		}
+		break;
+#if ENABLE_SM4_ECB
+	case SGD_SM4_ECB:
+		if (uiEncDataLength % 16) {
+			error_print();
+			return SDR_INARGERR;
+		}
+		break;
+#endif
+#if ENABLE_SM4_CFB
+	case SGD_SM4_CFB:
+		if (pucIV == NULL) {
+			error_print();
+			return SDR_INARGERR;
+		}
+		break;
+#endif
+#if ENABLE_SM4_OFB
+	case SGD_SM4_OFB:
+		if (pucIV == NULL) {
+			error_print();
+			return SDR_INARGERR;
+		}
+		break;
+#endif
+	default:
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	*puiDataLength = uiEncDataLength;
+
+	if (pucData == NULL) {
+		return SDR_OK;
+	}
+
+	// TODO: cache `SM4_KEY` in `SOFTSDF_KEY`, reduce cost of calling `sm4_set_encrypt_key`
+
+	switch (uiAlgID) {
+	case SGD_SM4_CBC:
+		sm4_set_decrypt_key(&sm4_key, key->key);
+		sm4_cbc_decrypt_blocks(&sm4_key, pucIV, pucEncData, uiEncDataLength/16, pucData);
+		break;
+#if ENABLE_SM4_ECB
+	case SGD_SM4_ECB:
+		sm4_set_decrypt_key(&sm4_key, key->key);
+		sm4_encrypt_blocks(&sm4_key, pucEncData, uiEncDataLength/16, pucData);
+		break;
+#endif
+#if ENABLE_SM4_CFB
+	case SGD_SM4_CFB:
+		sm4_set_encrypt_key(&sm4_key, key->key);
+		sm4_cfb_decrypt(&sm4_key, SM4_CFB_128, pucIV, pucEncData, uiEncDataLength, pucData);
+		break;
+#endif
+#if ENABLE_SM4_OFB
+	case SGD_SM4_OFB:
+		sm4_set_encrypt_key(&sm4_key, key->key);
+		sm4_ofb_encrypt(&sm4_key, pucIV, pucEncData, uiEncDataLength, pucData);
+		break;
+#endif
+	default:
+		gmssl_secure_clear(&sm4_key, sizeof(sm4_key));
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	gmssl_secure_clear(&sm4_key, sizeof(sm4_key));
+
+	return SDR_OK;
+}
+
+int SDF_CalculateMAC(
+	void *hSessionHandle,
+	void *hKeyHandle,
+	unsigned int uiAlgID,
+	unsigned char *pucIV,
+	unsigned char *pucData,
+	unsigned int uiDataLength,
+	unsigned char *pucMAC,
+	unsigned int *puiMACLength)
+{
+	// SOFTSDF_SESSION *session;
+	SOFTSDF_KEY *key;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	// session = deviceHandle->session_list;
+	// while (session != NULL && session != hSessionHandle) {
+	// 	session = session->next;
+	// }
+	// if (session == NULL) {
+	// 	error_print();
+	// 	return SDR_INARGERR;
+	// }
+
+	if (hKeyHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	// key = session->key_list;
+	// while (key != NULL && key != (SOFTSDF_KEY *)hKeyHandle) {
+	// 	key = key->next;
+	// }
+	key = (SOFTSDF_KEY *)hKeyHandle;
+	if (key == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+
+	// if (pucIV != NULL) {
+	// 	error_print();
+	// 	return SDR_INARGERR;
+	// }
+
+	if (pucData == NULL || uiDataLength <= 0) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (puiMACLength == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (uiAlgID == SGD_SM3) {
+		SM3_HMAC_CTX hmac_ctx;
+
+		if (key->key_size < 12) {
+			error_print();
+			return SDR_INARGERR;
+		}
+
+		*puiMACLength = SM3_HMAC_SIZE;
+
+		if (!pucMAC) {
+			return SDR_OK;
+		}
+
+		sm3_hmac_init(&hmac_ctx, key->key, key->key_size);
+		sm3_hmac_update(&hmac_ctx, pucData, uiDataLength);
+		sm3_hmac_finish(&hmac_ctx, pucMAC);
+
+		memset(&hmac_ctx, 0, sizeof(hmac_ctx));
+
+	} else if (uiAlgID == SGD_SM4_MAC) {
+		SM4_CBC_MAC_CTX cbc_mac_ctx;
+
+		if (key->key_size < SM4_KEY_SIZE) {
+			error_print();
+			return SDR_INARGERR;
+		}
+		*puiMACLength = SM4_CBC_MAC_SIZE;
+
+		if (!pucMAC) {
+			return SDR_OK;
+		}
+
+		sm4_cbc_mac_init(&cbc_mac_ctx, key->key);
+		sm4_cbc_mac_update(&cbc_mac_ctx, pucData, uiDataLength);
+		sm4_cbc_mac_finish(&cbc_mac_ctx, pucMAC);
+
+		memset(&cbc_mac_ctx, 0, sizeof(cbc_mac_ctx));
+
+	} else {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	return SDR_OK;
+}
+
+int SDF_HashInit(
+	void *hSessionHandle,
+	unsigned int uiAlgID,
+	ECCrefPublicKey *pucPublicKey,
+	unsigned char *pucID,
+	unsigned int uiIDLength)
+{
+	SOFTSDF_SESSION *session;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (uiAlgID != SGD_SM3) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	// FIXME: check step or return SDR_STEPERR;
+	sm3_init(&session->sm3_ctx);
+
+	if (pucPublicKey != NULL) {
+
+		SM2_POINT point;
+		SM2_Z256_POINT public_key;
+		uint8_t z[32];
+
+		if (pucID == NULL || uiIDLength <= 0) {
+			error_print();
+			return SDR_INARGERR;
+		}
+
+		memset(&point, 0, sizeof(point));
+		memcpy(point.x, pucPublicKey->x + ECCref_MAX_LEN - 32, 32);
+		memcpy(point.y, pucPublicKey->y + ECCref_MAX_LEN - 32, 32);
+		if (sm2_z256_point_from_bytes(&public_key, (uint8_t *)&point) != 1) {
+			error_print();
+			return SDR_INARGERR;
+		}
+
+		if (sm2_compute_z(z, &public_key, (const char *)pucID, uiIDLength) != 1) {
+			error_print();
+			return SDR_GMSSLERR;
+		}
+		sm3_update(&session->sm3_ctx, z, sizeof(z));
+	}
+
+	return SDR_OK;
+}
+
+int SDF_HashUpdate(
+	void *hSessionHandle,
+	unsigned char *pucData,
+	unsigned int uiDataLength)
+{
+	SOFTSDF_SESSION *session;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucData == NULL || uiDataLength <= 0) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	sm3_update(&session->sm3_ctx, pucData, uiDataLength);
+
+	return SDR_OK;
+}
+
+int SDF_HashFinal(void *hSessionHandle,
+	unsigned char *pucHash,
+	unsigned int *puiHashLength)
+{
+	SOFTSDF_SESSION *session;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucHash == NULL || puiHashLength == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	sm3_finish(&session->sm3_ctx, pucHash);
+
+	*puiHashLength = SM3_DIGEST_SIZE;
+	return SDR_OK;
+}
+
+int SDF_CreateFile(
+	void *hSessionHandle,
+	unsigned char *pucFileName,
+	unsigned int uiNameLen,
+	unsigned int uiFileSize)
+{
+	SOFTSDF_SESSION *session;
+	char filename[FILENAME_MAX_LEN];
+	FILE *file = NULL;
+	uint8_t buf[1024] = {0};
+	size_t i;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucFileName == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	if (uiNameLen <= 0 || uiNameLen >= FILENAME_MAX_LEN - 5) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	memcpy(filename, pucFileName, uiNameLen);
+	filename[uiNameLen] = 0;
+	if (strlen(filename) != uiNameLen) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	strcat(filename, ".file");
+
+	if (uiFileSize > 64 * 1024) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	file = fopen(filename, "wb");
+	if (file == NULL) {
+		error_puts("Failed to create file");
+		return SDR_GMSSLERR;
+	}
+	for (i = 0; i < uiFileSize/sizeof(buf); i++) {
+		fwrite(buf, 1, sizeof(buf), file);
+	}
+	fwrite(buf, 1, uiFileSize % sizeof(buf), file);
+	fclose(file);
+
+	return SDR_OK;
+}
+
+int SDF_ReadFile(
+	void *hSessionHandle,
+	unsigned char *pucFileName,
+	unsigned int uiNameLen,
+	unsigned int uiOffset,
+	unsigned int *puiReadLength,
+	unsigned char *pucBuffer)
+{
+	SOFTSDF_SESSION *session;
+	char filename[FILENAME_MAX_LEN];
+	FILE *file = NULL;
+	size_t bytesRead;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucFileName == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	if (uiNameLen <= 0 || uiNameLen >= FILENAME_MAX_LEN - 5) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	// memcpy(filename, pucFileName, uiNameLen);
+	// filename[uiNameLen] = 0;
+	// if (strlen(filename) != uiNameLen) {
+	// 	error_print();
+	// 	return SDR_INARGERR;
+	// }
+	snprintf(filename, FILENAME_MAX_LEN, "/var/sdf/%s.file", pucFileName);
+	// strcat(filename, ".file");
+
+	if (puiReadLength == NULL || *puiReadLength <= 0) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucBuffer == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	file = fopen(filename, "rb");
+	if (file == NULL) {
+		error_print();
+		return SDR_GMSSLERR;
+	}
+	if (fseek(file, uiOffset, SEEK_SET) != 0) {
+		fclose(file);
+		error_print();
+		return SDR_GMSSLERR;
+	}
+	bytesRead = fread(pucBuffer, 1, *puiReadLength, file);
+	if (bytesRead == 0) {
+		error_print();
+		fclose(file);
+		return SDR_GMSSLERR;
+	}
+	fclose(file);
+
+	*puiReadLength = bytesRead;
+	return SDR_OK;
+}
+
+int SDF_WriteFile(
+	void *hSessionHandle,
+	unsigned char *pucFileName,
+	unsigned int uiNameLen,
+	unsigned int uiOffset,
+	unsigned int uiWriteLength,
+	unsigned char *pucBuffer)
+{
+	SOFTSDF_SESSION *session;
+	char filename[FILENAME_MAX_LEN];
+	FILE *file = NULL;
+	size_t bytesWritten;
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucFileName == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	if (uiNameLen <= 0 || uiNameLen >= FILENAME_MAX_LEN - 5) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	// memcpy(filename, pucFileName, uiNameLen);
+	// filename[uiNameLen] = 0;
+	// if (strlen(filename) != uiNameLen) {
+	// 	error_print();
+	// 	return SDR_INARGERR;
+	// }
+	// snprintf(filename, sizeof(filename), "/var/sdf/%s.file", filename);
+	snprintf(filename, FILENAME_MAX_LEN, "/var/sdf/%s.file", pucFileName);
+	// strcat(filename, ".file");
+
+	if (uiWriteLength <= 0) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	if (uiWriteLength > 64 * 1024) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucBuffer == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	file = fopen(filename, "wb");
+	if (file == NULL) {
+		error_print();
+		return SDR_GMSSLERR;
+	}
+	if (fseek(file, uiOffset, SEEK_SET) != 0) {
+		error_print();
+		fclose(file);
+		return SDR_GMSSLERR;
+	}
+	bytesWritten = fwrite(pucBuffer, 1, uiWriteLength, file);
+	if (bytesWritten != uiWriteLength) {
+		error_print();
+		fclose(file);
+		return SDR_GMSSLERR;
+	}
+	fclose(file);
+
+	return SDR_OK;
+}
+
+int SDF_DeleteFile(
+	void *hSessionHandle,
+	unsigned char *pucFileName,
+	unsigned int uiNameLen)
+{
+	SOFTSDF_SESSION *session;
+	char filename[FILENAME_MAX_LEN];
+
+	if (deviceHandle == NULL) {
+		error_print();
+		return SDR_STEPERR;
+	}
+
+	if (hSessionHandle == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
+	}
+	if (session == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucFileName == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	if (uiNameLen <= 0 || uiNameLen >= FILENAME_MAX_LEN - 5) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	memcpy(filename, pucFileName, uiNameLen);
+	filename[uiNameLen] = 0;
+	if (strlen(filename) != uiNameLen) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	strcat(filename, ".file");
+
+	if (remove(filename) != 0) {
+		error_print();
+		return SDR_GMSSLERR;
+	}
+
+	return SDR_OK;
+}
+
+int SDF_InternalEncrypt_ECC(
+	void *hSessionHandle,
+	unsigned int uiIPKIndex,
+	unsigned int uiAlgID,
+	unsigned char *pucData,
+	unsigned int uiDataLength,
+	ECCCipher *pucEncData)
+{
+	SOFTSDF_SESSION *session;
+	char filename[FILENAME_MAX_LEN];
+	FILE *file = NULL;
+	SM2_KEY sm2_key;
 	SM2_CIPHERTEXT ciphertext;
 
-	if (!dev || !pass || !wrappedkey || !wrappedkey_len) {
+	if (deviceHandle == NULL) {
 		error_print();
-		return -1;
-	}
-	if (!dev->handle) {
-		error_print();
-		return -1;
+		return SDR_STEPERR;
 	}
 
-	// SM2_CIPHERTEXT <= DER
-	if (sm2_ciphertext_from_der(&ciphertext, &wrappedkey, &wrappedkey_len) != 1) {
+	if (!hSessionHandle) {
 		error_print();
-		return -1;
+		return SDR_INARGERR;
 	}
-	if (wrappedkey_len != 0) {
-		error_print();
-		return -1;
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
 	}
-
-	// ECCCipher <= SM2_CIPHERTEXT
-	ECCCipher_from_SM2_CIPHERTEXT(&eccCipher, &ciphertext);
-
-	// SDF_ImportKeyWithISK_ECC
-	if (SDF_OpenSession(dev->handle, &hSession) != SDR_OK) {
+	if (session == NULL) {
 		error_print();
-		return -1;
-	}
-	// XXX: does import_key need the right?
-	if (SDF_GetPrivateKeyAccessRight(hSession, key_index, (unsigned char *)pass, (unsigned int)strlen(pass)) != SDR_OK) {
-		(void)SDF_CloseSession(hSession);
-		error_print();
-		return -1;
-	}
-	if (SDF_ImportKeyWithISK_ECC(hSession, key_index, &eccCipher, &hKey) != SDR_OK) {
-		(void)SDF_CloseSession(hSession);
-		error_print();
-		return -1;
-	}
-	if (SDF_ReleasePrivateKeyAccessRight(hSession, (unsigned int)key_index) != SDR_OK) {
-		(void)SDF_CloseSession(hSession);
-		error_print();
-		return -1;
+		return SDR_INARGERR;
 	}
 
-	key->session = hSession;
-	key->handle = hKey;
-	return 1;
+	// load public key by uiISKIndex
+	snprintf(filename, FILENAME_MAX_LEN, "sm2encpub-%u.pem", uiIPKIndex);
+	file = fopen(filename, "rb");
+	if (file == NULL) {
+		error_print();
+		return SDR_KEYNOTEXIST;
+	}
+	if (sm2_public_key_info_from_pem(&sm2_key, file) != 1) {
+		error_print();
+		fclose(file);
+		return SDR_KEYNOTEXIST;
+	}
+	fclose(file);
+
+	// check uiAlgID
+	if (uiAlgID != SGD_SM2_3) {
+		error_print();
+		return SDR_ALGNOTSUPPORT;
+	}
+
+	if (pucData == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	if (uiDataLength > SM2_MAX_PLAINTEXT_SIZE) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	if (pucEncData == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	// encrypt
+	if (sm2_do_encrypt(&sm2_key, pucData, uiDataLength, &ciphertext) != 1) {
+		error_print();
+		return SDR_PKOPERR;
+	}
+	memset(pucEncData->x, 0, ECCref_MAX_LEN - 32);
+	memcpy(pucEncData->x + ECCref_MAX_LEN - 32, ciphertext.point.x, 32);
+	memset(pucEncData->y, 0, ECCref_MAX_LEN - 32);
+	memcpy(pucEncData->y + ECCref_MAX_LEN - 32, ciphertext.point.y, 32);
+	memcpy(pucEncData->M, ciphertext.hash, 32);
+	memcpy(pucEncData->C, ciphertext.ciphertext, ciphertext.ciphertext_size);
+	pucEncData->L = (unsigned int)ciphertext.ciphertext_size;
+
+	return SDR_OK;
 }
 
-int sdf_cbc_encrypt_init(SDF_CBC_CTX *ctx, const SDF_KEY *key, const uint8_t iv[16])
+int SDF_InternalDecrypt_ECC(
+	void *hSessionHandle,
+	unsigned int uiISKIndex,
+	unsigned int uiAlgID,
+	ECCCipher *pucEncData,
+	unsigned char *pucData,
+	unsigned int *puiDataLength)
 {
-	if (!ctx || !key || !iv) {
-		error_print();
-		return -1;
-	}
-	if (!key->session || !key->handle) {
-		error_print();
-		return -1;
-	}
-	ctx->key = *key;
-	memcpy(ctx->iv, iv, SM4_BLOCK_SIZE);
-	memset(ctx->block, 0, SM4_BLOCK_SIZE);
-	ctx->block_nbytes = 0;
-	return 1;
-}
-
-int sdf_cbc_encrypt_update(SDF_CBC_CTX *ctx,
-	const uint8_t *in, size_t inlen, uint8_t *out, size_t *outlen)
-{
-	size_t left;
-	size_t nblocks;
-	size_t len;
-
-	if (!ctx || !in || !out || !outlen) {
-		error_print();
-		return -1;
-	}
-	if (ctx->block_nbytes >= SM4_BLOCK_SIZE) {
-		error_print();
-		return -1;
-	}
-	*outlen = 0;
-	if (ctx->block_nbytes) {
-		left = SM4_BLOCK_SIZE - ctx->block_nbytes;
-		if (inlen < left) {
-			memcpy(ctx->block + ctx->block_nbytes, in, inlen);
-			ctx->block_nbytes += inlen;
-			return 1;
-		}
-		memcpy(ctx->block + ctx->block_nbytes, in, left);
-		if (sdf_cbc_encrypt_blocks(&ctx->key, ctx->iv, ctx->block, 1, out) != 1) {
-			error_print();
-			return -1;
-		}
-		in += left;
-		inlen -= left;
-		out += SM4_BLOCK_SIZE;
-		*outlen += SM4_BLOCK_SIZE;
-	}
-	if (inlen >= SM4_BLOCK_SIZE) {
-		nblocks = inlen / SM4_BLOCK_SIZE;
-		len = nblocks * SM4_BLOCK_SIZE;
-		if (sdf_cbc_encrypt_blocks(&ctx->key, ctx->iv, in, nblocks, out) != 1) {
-			error_print();
-			return -1;
-		}
-		in += len;
-		inlen -= len;
-		out += len;
-		*outlen += len;
-	}
-	if (inlen) {
-		memcpy(ctx->block, in, inlen);
-	}
-	ctx->block_nbytes = inlen;
-	return 1;
-}
-
-int sdf_cbc_encrypt_finish(SDF_CBC_CTX *ctx, uint8_t *out, size_t *outlen)
-{
-	if (!ctx || !out || !outlen) {
-		error_print();
-		return -1;
-	}
-	if (ctx->block_nbytes >= SM4_BLOCK_SIZE) {
-		error_print();
-		return -1;
-	}
-	if (sdf_cbc_padding_encrypt(&ctx->key, ctx->iv, ctx->block, ctx->block_nbytes, out, outlen) != 1) {
-		error_print();
-		return -1;
-	}
-	return 1;
-}
-
-int sdf_cbc_decrypt_init(SDF_CBC_CTX *ctx, const SDF_KEY *key, const uint8_t iv[16])
-{
-	if (!ctx || !key || !iv) {
-		error_print();
-		return -1;
-	}
-	if (!key->session || !key->handle) {
-		error_print();
-		return -1;
-	}
-	ctx->key = *key;
-	memcpy(ctx->iv, iv, SM4_BLOCK_SIZE);
-	memset(ctx->block, 0, SM4_BLOCK_SIZE);
-	ctx->block_nbytes = 0;
-	return 1;
-}
-
-int sdf_cbc_decrypt_update(SDF_CBC_CTX *ctx,
-	const uint8_t *in, size_t inlen, uint8_t *out, size_t *outlen)
-{
-	size_t left, len, nblocks;
-
-	if (!ctx || !in || !out || !outlen) {
-		error_print();
-		return -1;
-	}
-	if (ctx->block_nbytes > SM4_BLOCK_SIZE) {
-		error_print();
-		return -1;
-	}
-
-	*outlen = 0;
-	if (ctx->block_nbytes) {
-		left = SM4_BLOCK_SIZE - ctx->block_nbytes;
-		if (inlen <= left) {
-			memcpy(ctx->block + ctx->block_nbytes, in, inlen);
-			ctx->block_nbytes += inlen;
-			return 1;
-		}
-		memcpy(ctx->block + ctx->block_nbytes, in, left);
-		if (sdf_cbc_decrypt_blocks(&ctx->key, ctx->iv, ctx->block, 1, out) != 1) {
-			error_print();
-			return -1;
-		}
-		in += left;
-		inlen -= left;
-		out += SM4_BLOCK_SIZE;
-		*outlen += SM4_BLOCK_SIZE;
-	}
-	if (inlen > SM4_BLOCK_SIZE) {
-		nblocks = (inlen-1) / SM4_BLOCK_SIZE;
-		len = nblocks * SM4_BLOCK_SIZE;
-		if (sdf_cbc_decrypt_blocks(&ctx->key, ctx->iv, in, nblocks, out) != 1) {
-			error_print();
-			return -1;
-		}
-		in += len;
-		inlen -= len;
-		out += len;
-		*outlen += len;
-	}
-	memcpy(ctx->block, in, inlen);
-	ctx->block_nbytes = inlen;
-	return 1;
-}
-
-int sdf_cbc_decrypt_finish(SDF_CBC_CTX *ctx, uint8_t *out, size_t *outlen)
-{
-	if (!ctx || !out || !outlen) {
-		error_print();
-		return -1;
-	}
-	if (ctx->block_nbytes != SM4_BLOCK_SIZE) {
-		error_print();
-		return -1;
-	}
-	if (sdf_cbc_padding_decrypt(&ctx->key, ctx->iv, ctx->block, SM4_BLOCK_SIZE, out, outlen) != 1) {
-		error_print();
-		return -1;
-	}
-	return 1;
-}
-
-int sdf_export_sign_public_key(SDF_DEVICE *dev, int key_index, SM2_KEY *sm2_key)
-{
-	void *hSession;
-	ECCrefPublicKey eccPublicKey;
-
-	if (!dev || !sm2_key) {
-		error_print();
-		return -1;
-	}
-
-	if (SDF_OpenSession(dev->handle, &hSession) != SDR_OK) {
-		error_print();
-		return -1;
-	}
-	if (SDF_ExportSignPublicKey_ECC(hSession, key_index, &eccPublicKey) != SDR_OK) {
-		(void)SDF_CloseSession(hSession);
-		error_print();
-		return -1;
-	}
-	(void)SDF_CloseSession(hSession);
-
-	memset(sm2_key, 0, sizeof(SM2_KEY));
-	if (ECCrefPublicKey_to_SM2_Z256_POINT(&eccPublicKey, &sm2_key->public_key) != 1) {
-		error_print();
-		return -1;
-	}
-	return 1;
-}
-
-int sdf_export_encrypt_public_key(SDF_DEVICE *dev, int key_index, SM2_KEY *sm2_key)
-{
-	void *hSession;
-	ECCrefPublicKey eccPublicKey;
-
-	if (!dev || !sm2_key) {
-		error_print();
-		return -1;
-	}
-
-	if (SDF_OpenSession(dev->handle, &hSession) != SDR_OK) {
-		error_print();
-		return -1;
-	}
-	if (SDF_ExportEncPublicKey_ECC(hSession, key_index, &eccPublicKey) != SDR_OK) {
-		(void)SDF_CloseSession(hSession);
-		error_print();
-		return -1;
-	}
-	(void)SDF_CloseSession(hSession);
-
-	memset(sm2_key, 0, sizeof(SM2_KEY));
-	if (ECCrefPublicKey_to_SM2_Z256_POINT(&eccPublicKey, &sm2_key->public_key) != 1) {
-		error_print();
-		return -1;
-	}
-	return 1;
-}
-
-int sdf_load_private_key(SDF_DEVICE *dev, SDF_PRIVATE_KEY *key, int key_index, const char *pass)
-{
-	void *hSession = NULL;
-	ECCrefPublicKey eccPublicKey;
-
-	if (!dev || !key || !pass) {
-		error_print();
-		return -1;
-	}
-	if (key_index < 0) {
-		error_print();
-		return -1;
-	}
-
-	if (SDF_OpenSession(dev->handle, &hSession) != SDR_OK) {
-		error_print();
-		return -1;
-	}
-	if (SDF_GetPrivateKeyAccessRight(hSession, key_index, (unsigned char *)pass, (unsigned int)strlen(pass)) != SDR_OK) {
-		(void)SDF_CloseSession(hSession);
-		error_print();
-		return -1;
-	}
-
-	key->session = hSession;
-	key->index = key_index;
-	return 1;
-}
-
-int sdf_sign(const SDF_PRIVATE_KEY *key, const uint8_t dgst[32], uint8_t *sig, size_t *siglen)
-{
-	ECCSignature ecc_sig;
-	SM2_SIGNATURE sm2_sig;
-
-	if (!key || !dgst || !sig || !siglen) {
-		error_print();
-		return -1;
-	}
-	if (SDF_InternalSign_ECC(key->session, key->index, (unsigned char *)dgst, 32, &ecc_sig) != SDR_OK) {
-		error_print();
-		return -1;
-	}
-	if (ECCSignature_to_SM2_SIGNATURE(&ecc_sig, &sm2_sig) != 1) {
-		error_print();
-		return -1;
-	}
-	*siglen = 0;
-	if (sm2_signature_to_der(&sm2_sig, &sig, siglen) != 1) {
-		error_print();
-		return -1;
-	}
-	return 1;
-}
-
-int sdf_decrypt(const SDF_PRIVATE_KEY *key, const uint8_t *in, size_t inlen, uint8_t *out, size_t *outlen)
-{
-	ECCCipher eccCipher;
+	SOFTSDF_SESSION *session;
+	SOFTSDF_CONTAINER *container;
 	SM2_CIPHERTEXT ciphertext;
-	unsigned int uiLength = 0;
+	size_t plaintext_len;
 
-	if (!key || !in || !outlen) {
+	if (deviceHandle == NULL) {
 		error_print();
-		return -1;
-	}
-	if (!key->session || key->index < 0) {
-		error_print();
-		return -1;
-	}
-	if (!out) {
-		*outlen = SM2_MAX_PLAINTEXT_SIZE;
-		return 1;
+		return SDR_STEPERR;
 	}
 
-	if (sm2_ciphertext_from_der(&ciphertext, &in, &inlen) != 1) {
+	if (!hSessionHandle) {
 		error_print();
-		return -1;
+		return SDR_INARGERR;
 	}
-	if (inlen != 0) {
-		error_print();
-		return -1;
+	session = deviceHandle->session_list;
+	while (session != NULL && session != hSessionHandle) {
+		session = session->next;
 	}
-
-	ECCCipher_from_SM2_CIPHERTEXT(&eccCipher, &ciphertext);
-
-	if (SDF_InternalDecrypt_ECC(key->session, key->index, SGD_SM2_3, &eccCipher, out, &uiLength) != SDR_OK) {
+	if (session == NULL) {
 		error_print();
-		return -1;
+		return SDR_INARGERR;
 	}
 
-	*outlen = uiLength;
-	return 1;
+	// load public key by uiISKIndex
+	container = session->container_list;
+	while (container != NULL && container->key_index != uiISKIndex) {
+		container = container->next;
+	}
+	if (container == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	// check uiAlgID
+	if (uiAlgID != SGD_SM2_3) {
+		error_print();
+		return SDR_ALGNOTSUPPORT;
+	}
+
+	// check ciphertext
+	if (pucEncData == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	if (pucEncData->L > SM2_MAX_PLAINTEXT_SIZE) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	// convert ECCCipher to SM2_CIPHERTEXT
+	if (memcmp(pucEncData->x, zeros, ECCref_MAX_LEN - 32) != 0) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	if (memcmp(pucEncData->y, zeros, ECCref_MAX_LEN - 32) != 0) {
+		error_print();
+		return SDR_INARGERR;
+	}
+	memcpy(ciphertext.point.x, pucEncData->x + ECCref_MAX_LEN - 32, 32);
+	memcpy(ciphertext.point.y, pucEncData->y + ECCref_MAX_LEN - 32, 32);
+	memcpy(ciphertext.hash, pucEncData->M, 32);
+	memcpy(ciphertext.ciphertext, pucEncData->C, pucEncData->L);
+	ciphertext.ciphertext_size = pucEncData->L;
+
+	if (puiDataLength == NULL) {
+		error_print();
+		return SDR_INARGERR;
+	}
+
+	if (pucData == NULL) {
+		*puiDataLength = pucEncData->L;
+		return SDR_OK;
+	}
+
+	if (sm2_do_decrypt(&container->enc_key, &ciphertext, pucData, &plaintext_len) != 1) {
+		error_print();
+		return SDR_PKOPERR;
+	}
+
+	*puiDataLength = (unsigned int)plaintext_len;
+	return SDR_OK;
 }
 
-int sdf_sign_init(SDF_SIGN_CTX *ctx, const SDF_PRIVATE_KEY *key, const char *id, size_t idlen)
+int SDF_InternalPublicKeyOperation_RSA(
+	void *hSessionHandle,
+	unsigned int uiKeyIndex,
+	unsigned char *pucDataInput,
+	unsigned int uiInputLength,
+	unsigned char *pucDataOutput,
+	unsigned int *puiOutputLength)
 {
-	ECCrefPublicKey eccPublicKey;
-	SM2_Z256_POINT z256_point;
-
-	if (!ctx || !key) {
-		error_print();
-		return -1;
-	}
-	if (!key->session) {
-		error_print();
-		return -1;
-	}
-
-	if (SDF_ExportSignPublicKey_ECC(key->session, key->index, &eccPublicKey) != SDR_OK) {
-		error_print();
-		return -1;
-	}
-	if (ECCrefPublicKey_to_SM2_Z256_POINT(&eccPublicKey, &z256_point) != 1) {
-		error_print();
-		return -1;
-	}
-
-	sm3_init(&ctx->sm3_ctx);
-	if (id) {
-		uint8_t z[SM3_DIGEST_SIZE];
-
-		if (idlen <= 0 || idlen > SM2_MAX_ID_LENGTH) {
-			error_print();
-			return -1;
-		}
-		sm2_compute_z(z, &z256_point, id, idlen);
-		sm3_update(&ctx->sm3_ctx, z, sizeof(z));
-	}
-	ctx->saved_sm3_ctx = ctx->sm3_ctx;
-
-	ctx->key = *key;
-	return 1;
-}
-
-int sdf_sign_update(SDF_SIGN_CTX *ctx, const uint8_t *data, size_t datalen)
-{
-	if (!ctx) {
-		error_print();
-		return -1;
-	}
-	if (data && datalen > 0) {
-		sm3_update(&ctx->sm3_ctx, data, datalen);
-	}
-	return 1;
-}
-
-int sdf_sign_finish(SDF_SIGN_CTX *ctx, uint8_t *sig, size_t *siglen)
-{
-	uint8_t dgst[SM3_DIGEST_SIZE];
-
-	if (!ctx || !sig || !siglen) {
-		error_print();
-		return -1;
-	}
-
-	sm3_finish(&ctx->sm3_ctx, dgst);
-
-	if (sdf_sign(&ctx->key, dgst, sig, siglen) != 1) {
-		error_print();
-		return -1;
-	}
-	return 1;
-}
-
-int sdf_sign_reset(SDF_SIGN_CTX *ctx)
-{
-	if (!ctx) {
-		error_print();
-		return -1;
-	}
-	ctx->sm3_ctx = ctx->saved_sm3_ctx;
-	return 1;
-}
-
-int sdf_release_key(SDF_PRIVATE_KEY *key)
-{
-	if (SDF_ReleasePrivateKeyAccessRight(key->session, key->index) != SDR_OK) {
-		error_print();
-	}
-	if (SDF_CloseSession(key->session) != SDR_OK) {
-		error_print();
-		return -1;
-	}
-	return 1;
-}
-
-int sdf_close_device(SDF_DEVICE *dev)
-{
-	if (dev) {
-		if (dev->handle) {
-			if (SDF_CloseDevice(dev->handle) != SDR_OK) {
-				error_print();
-				return -1;
-			}
-			memset(dev, 0, sizeof(*dev));
-		}
-	}
-	return 1;
+	error_print();
+	return SDR_NOTSUPPORT;
 }

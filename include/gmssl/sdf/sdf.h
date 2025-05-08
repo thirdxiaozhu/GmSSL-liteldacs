@@ -26,7 +26,7 @@
 #define HEADER_SDF_H
 
 #include <stdio.h>
-#include "../sgd.h"
+#include "sgd.h"
 
 
 #ifdef __cplusplus
@@ -34,6 +34,19 @@ extern "C" {
 #endif
 
 
+#define SDR_GMSSLERR	(SDR_BASE + 0x00000100)
+
+
+
+#define SOFTSDF_MAX_KEY_SIZE	64
+
+	struct SOFTSDF_KEY {
+		uint8_t key[SOFTSDF_MAX_KEY_SIZE];
+		size_t key_size;
+		struct SOFTSDF_KEY *next;
+	};
+
+	typedef struct SOFTSDF_KEY SOFTSDF_KEY;
 
 #pragma pack(1)
 typedef struct DeviceInfo_st {
@@ -281,6 +294,12 @@ int SDF_ImportKeyWithKEK(
 	unsigned int uiKeyLength,
 	void **phKeyHandle);
 
+int SDF_ImportKey(
+		void *hSessionHandle,
+		unsigned char *pucKey,
+		unsigned int uiKeyLength,
+		void **phKeyHandle);
+
 int SDF_DestroyKey(
 	void *hSessionHandle,
 	void *hKeyHandle);
@@ -428,6 +447,9 @@ int SDF_DeleteFile(
 	unsigned char *pucFileName,
 	unsigned int uiNameLen);
 
+ int generate_kek(unsigned int uiKEKIndex);
+ int generate_sign_key(unsigned int uiKeyIndex, const char *pass);
+ int generate_enc_key(unsigned int uiKeyIndex, const char *pass);
 #define SDR_OK			0x0
 #define SDR_BASE		0x01000000
 #define SDR_UNKNOWERR		(SDR_BASE + 0x00000001)

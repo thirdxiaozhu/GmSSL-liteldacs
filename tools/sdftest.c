@@ -19,8 +19,8 @@
 #include <gmssl/sm4.h>
 #include <gmssl/rand.h>
 #include <gmssl/error.h>
-#include "../src/sdf/sdf.h"
-#include "../src/sdf/sdf_ext.h"
+#include <gmssl/sdf/sdf.h>
+#include <gmssl/sdf/sdf_ext.h>
 
 
 static const char *usage = "-lib so_path -kek num -key num -pass str";

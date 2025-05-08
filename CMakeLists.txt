@@ -129,56 +129,56 @@ set(src
 	src/file.c
 )
 
-set(tools
-	tools/gmssl.c
-	tools/version.c
-	tools/sm4.c
-	tools/sm4_cbc.c
-	tools/sm4_ctr.c
-	tools/sm4_gcm.c
-	tools/sm4_cbc_sm3_hmac.c
-	tools/sm4_ctr_sm3_hmac.c
-	tools/sm3.c
-	tools/sm3hmac.c
-	tools/sm3_pbkdf2.c
-	tools/sm3xmss_keygen.c
-	tools/sm2keygen.c
-	tools/sm2sign.c
-	tools/sm2verify.c
-	tools/sm2encrypt.c
-	tools/sm2decrypt.c
-	tools/sm9setup.c
-	tools/sm9keygen.c
-	tools/sm9sign.c
-	tools/sm9verify.c
-	tools/sm9encrypt.c
-	tools/sm9decrypt.c
-	tools/zuc.c
-	tools/rand.c
-	tools/ghash.c
-	tools/certgen.c
-	tools/certparse.c
-	tools/certverify.c
-	tools/certrevoke.c
-	tools/reqgen.c
-	tools/reqparse.c
-	tools/reqsign.c
-	tools/crlgen.c
-	tools/crlget.c
-	tools/crlparse.c
-	tools/crlverify.c
-	tools/cmssign.c
-	tools/cmsverify.c
-	tools/cmsencrypt.c
-	tools/cmsdecrypt.c
-	tools/cmsparse.c
-	tools/tlcp_client.c
-	tools/tlcp_server.c
-	tools/tls12_client.c
-	tools/tls12_server.c
-	tools/tls13_client.c
-	tools/tls13_server.c
-)
+#set(tools
+#	tools/gmssl.c
+#	tools/version.c
+#	tools/sm4.c
+#	tools/sm4_cbc.c
+#	tools/sm4_ctr.c
+#	tools/sm4_gcm.c
+#	tools/sm4_cbc_sm3_hmac.c
+#	tools/sm4_ctr_sm3_hmac.c
+#	tools/sm3.c
+#	tools/sm3hmac.c
+#	tools/sm3_pbkdf2.c
+#	tools/sm3xmss_keygen.c
+#	tools/sm2keygen.c
+#	tools/sm2sign.c
+#	tools/sm2verify.c
+#	tools/sm2encrypt.c
+#	tools/sm2decrypt.c
+#	tools/sm9setup.c
+#	tools/sm9keygen.c
+#	tools/sm9sign.c
+#	tools/sm9verify.c
+#	tools/sm9encrypt.c
+#	tools/sm9decrypt.c
+#	tools/zuc.c
+#	tools/rand.c
+#	tools/ghash.c
+#	tools/certgen.c
+#	tools/certparse.c
+#	tools/certverify.c
+#	tools/certrevoke.c
+#	tools/reqgen.c
+#	tools/reqparse.c
+#	tools/reqsign.c
+#	tools/crlgen.c
+#	tools/crlget.c
+#	tools/crlparse.c
+#	tools/crlverify.c
+#	tools/cmssign.c
+#	tools/cmsverify.c
+#	tools/cmsencrypt.c
+#	tools/cmsdecrypt.c
+#	tools/cmsparse.c
+#	tools/tlcp_client.c
+#	tools/tlcp_server.c
+#	tools/tls12_client.c
+#	tools/tls12_server.c
+#	tools/tls13_client.c
+#	tools/tls13_server.c
+#)
 
 set(tests
 	sm4
@@ -365,7 +365,7 @@ if (ENABLE_SM4_ECB)
 	message(STATUS "ENABLE_SM4_ECB is ON")
 	add_definitions(-DENABLE_SM4_ECB)
 	list(APPEND src src/sm4_ecb.c)
-	list(APPEND tools tools/sm4_ecb.c)
+#	list(APPEND tools tools/sm4_ecb.c)
 	list(APPEND tests sm4_ecb)
 endif()
 
@@ -373,7 +373,7 @@ if (ENABLE_SM4_OFB)
 	message(STATUS "ENABLE_SM4_OFB is ON")
 	add_definitions(-DENABLE_SM4_OFB)
 	list(APPEND src src/sm4_ofb.c)
-	list(APPEND tools tools/sm4_ofb.c)
+#	list(APPEND tools tools/sm4_ofb.c)
 	list(APPEND tests sm4_ofb)
 endif()
 
@@ -381,7 +381,7 @@ if (ENABLE_SM4_CFB)
 	message(STATUS "ENABLE_SM4_CFB is ON")
 	add_definitions(-DENABLE_SM4_CFB)
 	list(APPEND src src/sm4_cfb.c)
-	list(APPEND tools tools/sm4_cfb.c)
+#	list(APPEND tools tools/sm4_cfb.c)
 	list(APPEND tests sm4_cfb)
 endif()
 
@@ -390,7 +390,7 @@ if (ENABLE_SM4_CCM)
 	set(ENABLE_SM4_CBC_MAC ON)
 	add_definitions(-DENABLE_SM4_CCM)
 	list(APPEND src src/sm4_ccm.c)
-	list(APPEND tools tools/sm4_ccm.c)
+#	list(APPEND tools tools/sm4_ccm.c)
 	list(APPEND tests sm4_ccm)
 endif()
 
@@ -398,7 +398,7 @@ if (ENABLE_SM4_XTS)
 	message(STATUS "ENABLE_SM4_XTS is ON")
 	add_definitions(-DENABLE_SM4_XTS)
 	list(APPEND src src/sm4_xts.c)
-	list(APPEND tools tools/sm4_xts.c)
+#	list(APPEND tools tools/sm4_xts.c)
 	list(APPEND tests sm4_xts)
 endif()
 
@@ -488,7 +488,7 @@ endif()
 if (ENABLE_SM4_CBC_MAC)
 	message(STATUS "ENABLE_SM4_CBC_MAC is ON")
 	list(APPEND src src/sm4_cbc_mac.c)
-	list(APPEND tools tools/sm4_cbc_mac.c)
+#	list(APPEND tools tools/sm4_cbc_mac.c)
 	list(APPEND tests sm4_cbc_mac)
 endif()
 
@@ -516,7 +516,7 @@ if (ENABLE_SKF)
 		src/skf/skf_ext.c
 		src/skf/skf_prn.c
 		src/skf/skf_wisec.c)
-	list(APPEND tools tools/skfutil.c)
+#	list(APPEND tools tools/skfutil.c)
 	add_library(skf_dummy SHARED src/skf/skf_dummy.c)
 	set_target_properties(skf_dummy PROPERTIES VERSION 3.1 SOVERSION 3)
 endif()
@@ -526,11 +526,13 @@ if (ENABLE_SDF)
 	add_definitions(-DENABLE_SDF)
 	list(APPEND src
 		src/sdf/sdf.c
-		src/sdf/sdf_lib.c
-		src/sdf/sdf_meth.c
-		src/sdf/sdf_ext.c
-		src/sdf/sdf_sansec.c)
-	list(APPEND tools tools/sdfinfo.c tools/sdfdigest.c tools/sdfexport.c tools/sdfsign.c tools/sdfencrypt.c tools/sdfdecrypt.c tools/sdftest.c)
+		src/sdf/sdf_init.c
+	)
+#		src/sdf/sdf_lib.c
+#		src/sdf/sdf_meth.c
+#		src/sdf/sdf_ext.c
+#		src/sdf/sdf_sansec.c)
+#	list(APPEND tools tools/sdfinfo.c tools/sdfdigest.c tools/sdfexport.c tools/sdfsign.c tools/sdfencrypt.c tools/sdfdecrypt.c tools/sdftest.c)
 endif()
 
 
@@ -541,7 +543,7 @@ if (ENABLE_HTTP_TESTS)
 endif()
 
 
-option(BUILD_SHARED_LIBS "Build using shared libraries" ON)
+option(BUILD_SHARED_LIBS "Build using shared libraries" OFF)
 
 if (CMAKE_C_COMPILER_ID MATCHES "MSVC")
 	message(STATUS "CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS")
@@ -582,6 +584,17 @@ SET_TARGET_PROPERTIES(gmssl PROPERTIES VERSION 3.1 SOVERSION 3)
 
 install(TARGETS gmssl ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/gmssl DESTINATION include)
+INSTALL(CODE "
+    # 创建目录（包含父目录）
+    file(MAKE_DIRECTORY \"/var/sdf\")
+    file(CHMOD \"/var/sdf\"
+        DIRECTORY_PERMISSIONS
+        OWNER_READ OWNER_WRITE OWNER_EXECUTE
+        GROUP_READ GROUP_EXECUTE GROUP_WRITE
+        WORLD_READ WORLD_EXECUTE WORLD_WRITE
+    )
+")
+
 
 if(UNIX AND NOT APPLE)
 	message(STATUS "Detected Linux, configuring /etc/ld.so.conf.d/gmssl.conf")
@@ -594,12 +607,12 @@ endif()
 
 
 if (NOT ${CMAKE_SYSTEM_NAME} STREQUAL "iOS")
-	add_executable(gmssl-bin ${tools})
-	target_link_libraries(gmssl-bin LINK_PUBLIC gmssl)
-	set_target_properties(gmssl-bin PROPERTIES RUNTIME_OUTPUT_NAME gmssl)
-	if (MINGW)
-		target_link_libraries(gmssl-bin PRIVATE Ws2_32)
-	endif()
+#	add_executable(gmssl-bin ${tools})
+#	target_link_libraries(gmssl-bin LINK_PUBLIC gmssl)
+#	set_target_properties(gmssl-bin PROPERTIES RUNTIME_OUTPUT_NAME gmssl)
+#	if (MINGW)
+#		target_link_libraries(gmssl-bin PRIVATE Ws2_32)
+#	endif()
 
 	enable_testing()
 	foreach(name ${tests})
@@ -608,17 +621,17 @@ if (NOT ${CMAKE_SYSTEM_NAME} STREQUAL "iOS")
 		target_link_libraries (${name}test LINK_PUBLIC gmssl)
 	endforeach()
 
-	install(TARGETS gmssl-bin RUNTIME DESTINATION bin)
+#	install(TARGETS gmssl-bin RUNTIME DESTINATION bin)
 endif()
 
 if (CMAKE_C_COMPILER_ID MATCHES "MSVC")
-	set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT gmssl-bin)
+#	set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT gmssl-bin)
 	set(CMAKE_INSTALL_PREFIX "C:/Program Files/GmSSL") # change by `cmake -DCMAKE_INSTALL_PREFIX=C:\path\to\install`
 	# run `set path=%path%;C:\Program Files\GmSSL\bin`
 	add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 
 	target_compile_options(gmssl PRIVATE /utf-8)
-	target_compile_options(gmssl-bin PRIVATE /utf-8)
+#	target_compile_options(gmssl-bin PRIVATE /utf-8)
 
 #	target_compile_options(gmssl PRIVATE /wd4996)
 #	target_compile_options(gmssl-bin PRIVATE /wd4996)
